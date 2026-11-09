@@ -1,79 +1,110 @@
 # Mulqi Context Compression
 
-Native DeepSeek Harness plugin for **model-driven, incremental, hierarchical context compression**
-("the fold") — long-lived agent sessions with a bounded context window, restorable digest blocks,
-and no re-summarization decay.
+Native DeepSeek Harness plugin that compresses a long agent session by folding settled work
+into restorable digest blocks. The model writes each summary; the engine keeps every folded
+message addressable, so detail is recalled instead of lost.
 
-- Target host: DeepSeek Harness `0.2.1-rc.2` (exact pin; the host refuses the bundle on any other version)
-- Runtime: Node.js builtins only — zero runtime dependencies
-- Surfaces: one bundled doctrine skill (`mulqi-context-compression`) + four native tools
+- Target host: DeepSeek Harness `0.2.1-rc.2` (exact pin; the host refuses the bundle on any
+  other version)
+- Runtime: Node.js builtins only, zero runtime dependencies
+- Surfaces: one bundled doctrine skill (`mulqi-context-compression`) plus four native tools
   (`mulqi_cc_status`, `mulqi_cc_compress`, `mulqi_cc_decompress`, `mulqi_cc_search`)
 
 ## What it does
 
-Long sessions accumulate tool output until the context window fills. The classic remedy — summarize
-the whole history into one opaque blob and discard the source — is irreversible and degrades with
-every round. The fold works differently:
+Long sessions accumulate tool output until the context window fills. The usual remedy is to
+summarize the whole history into one opaque blob and discard the source. That is irreversible,
+and the summary degrades with every round because it summarizes earlier summaries.
 
-1. **The model writes the summary.** When a task step settles, the model digests the *consumed
-   increment* into one compact, task-relative block (`mulqi_cc_compress`), keeping verbatim the
-   paths, exact values, error strings, and decisions with rationale it may still need.
-2. **The engine orchestrates everything else.** Stable per-message refs (`mNNNNN`), tiered digest
-   blocks with lineage (tier-1 → tier-2 distillation), protected zones enforced in code (first and
-   last user message, the recent working zone, compression tool results), and a demand-side growth
-   gate that recommends compression between task steps with real sizes — never with a fill-ratio
-   number to anchor on.
-3. **Everything folded stays restorable.** `mulqi_cc_decompress` re-activates a block's original
-   messages (whole block, sub-range, or to a host-readable file), and `mulqi_cc_search` recalls
-   folded detail by keyword before you re-read or re-run anything.
+The fold avoids both problems:
 
-The doctrine — when, what, how much — ships as a bundled skill so the judgment is resident and
-inspectable, not baked into model weights or a hidden prompt.
+1. **The model writes the summary.** When a task step settles, the model folds the consumed
+   increment into one compact, task-relative block (`mulqi_cc_compress`). Paths, exact values,
+   error strings, and decisions with their rationale stay verbatim when the model judges it
+   may still need them.
+2. **The engine orchestrates everything else.** It assigns stable per-message refs (`mNNNNN`),
+   tracks tiered blocks with lineage (tier-1 to tier-2 distillation), enforces protected zones
+   in code (first and last user message, the recent working zone, compression tool results),
+   and gates growth on the demand side. The gate recommends compression between task steps and
+   reports real byte sizes rather than a fill-ratio number the model could anchor on.
+3. **Every folded message stays restorable.** `mulqi_cc_decompress` re-activates a block's
+   original messages: the whole block, a sub-range, or a host-readable file. `mulqi_cc_search`
+   recalls folded detail by keyword before you re-read or re-run anything.
+
+The doctrine (when to fold, what to keep, how much to keep) ships as a bundled skill. The
+judgment stays resident in the session and inspectable in text, not baked into model weights
+or a hidden prompt.
 
 ## Install (DSH 0.2.1-rc.2)
 
+`dsh plugin` forwards its arguments to pnpm inside the profile directory, so the install is an
+ordinary pnpm `add`. The profile is created on first use if it does not exist yet.
+
 ```bash
-# from this directory (or the published tarball/registry entry)
-dsh plugin --profile <name> add <path-or-spec>
-dsh --profile <name> --dump-config | grep mulqi-context-compression   # mounted row, no "skipping"
+# 1. Install. Run from this directory so the relative path resolves.
+dsh plugin --profile <name> add .
+
+#    or install a published tarball / registry entry instead of the working copy:
+# dsh plugin --profile <name> add <pkg-name>@<version>
 ```
 
-Restart the profile's host after installing. The skill appears in the session catalog under
-`mulqi-context-compression`; the four tools appear in the tool registry for every agent in the
-profile.
+```bash
+# 2. Confirm the bundle row is mounted. Expect a `mulqi-context-compression` entry
+#    and no "skipping" line for it.
+dsh --profile <name> --dump-config | grep -A1 mulqi-context-compression
+```
+
+```bash
+# 3. Restart the profile's host so the new row is loaded.
+dsh --profile <name>
+```
+
+After the restart, the skill `mulqi-context-compression` appears in the session catalog and the
+four `mulqi_cc_*` tools appear in the tool registry for every agent in the profile.
+
+Two things the install does not do, by design:
+
+- **Install-time version check.** The pin lives in `package.json` as `dsh.engines.dsh:
+  "0.2.1-rc.2"`, which is an exact version and not a range. `pnpm add` accepts it on any host;
+  the host then rejects the row at mount time unless its own version is exactly `0.2.1-rc.2`.
+  Check with `dsh --version` before installing.
+- **Config wiring.** The bundle mounts with the engine's defaults and exposes no config row (see
+  Configuration below).
 
 ## Usage
 
-- **Check between task steps:** `mulqi_cc_status` — composition breakdown, compressible ranges with
-  real sizes, block list, and a nudge when the growth gate fires.
-- **Compress a settled step:** `mulqi_cc_compress` with `fromRef`/`toRef` (taken from status
-  ranges), a task-relative `topic`, and your `summary` (under ~2K tokens for tier 1).
-- **Recall before re-doing work:** `mulqi_cc_search` with exact identifiers.
-- **Restore:** `mulqi_cc_decompress` — whole block, `fromRef`/`toRef` sub-range, or `toFile: true`
-  for large payloads (returns a path; keep context lean).
+- **Check between task steps:** `mulqi_cc_status` returns the composition breakdown, the
+  compressible ranges with real sizes, the block list, and a nudge when the growth gate fires.
+- **Compress a settled step:** `mulqi_cc_compress` takes `fromRef` and `toRef` (from the status
+  ranges), a task-relative `topic`, and your `summary`. Keep tier-1 summaries under about 2K
+  tokens.
+- **Recall before redoing work:** `mulqi_cc_search` with exact identifiers.
+- **Restore:** `mulqi_cc_decompress` takes a whole block, a `fromRef`/`toRef` sub-range, or
+  `toFile: true` for large payloads. The file variant returns a path, which keeps context lean.
 
-The bundled skill documents the full doctrine (timing rules, KEEP/DROP classes, protected zones,
-tiering, anti-patterns). Read it first.
+The bundled skill documents the full doctrine: timing rules, KEEP and DROP classes, protected
+zones, tiering, and anti-patterns. Read it first.
 
 ## Configuration
 
-The engine ships with documented defaults (table in `docs/engineering.md` §Configuration). The
-bundle registers the tools with those defaults; every knob is also available programmatically:
-`createFoldTools({ config })` in `lib/tools.js` accepts overrides, so a host that composes the
-engine directly can retune gates without forking. Per-profile config wiring through the bundle
-patch row is intentionally not claimed in v1.
+The engine ships with documented defaults (table in `docs/engineering.md`, section
+Configuration). The bundle registers the tools with those defaults. Every knob is also
+available programmatically: `createFoldTools({ config })` in `lib/tools.js` accepts overrides,
+so a host that composes the engine directly can retune gates without forking. Per-profile
+config wiring through the bundle patch row is not claimed in v1.
 
-Token counting is a documented `chars/4` heuristic — no tokenizer dependency.
+Token counting uses a documented `chars/4` heuristic, so there is no tokenizer dependency.
 
 ## Known boundaries (v1)
 
-- **No wire-level proxy:** compression state lives in-process per session; host compaction (if
-  configured) remains the backstop for overflow, and the model-API cache economics of a proxy
+- **No wire-level proxy:** compression state lives in-process per session. Host compaction, if
+  configured, remains the backstop for overflow. The model-API cache economics of a proxy
   layout are out of scope for this native bundle.
 - **In-memory fold state:** blocks are not persisted across host restarts.
-- **Tier-2 distillation is model-initiated:** the doctrine says when; the engine does not auto-promote.
-- **Sub-agent lanes:** fold state is keyed per session; child agents see their own lane.
+- **Tier-2 distillation is model-initiated:** the doctrine says when to promote; the engine
+  does not auto-promote.
+- **Sub-agent lanes:** fold state is keyed per session, so a child agent sees its own lane.
 
 ## License
 
-MIT — see `LICENSE`. Concept provenance and attribution: `NOTICE.md`.
+MIT. See `LICENSE`. Concept provenance and attribution are recorded in `NOTICE.md`.
