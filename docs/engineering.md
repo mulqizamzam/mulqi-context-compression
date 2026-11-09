@@ -1,4 +1,4 @@
-# Engineering Reference — Mulqi Context Compression
+# Engineering Reference: Mulqi Context Compression
 
 For agents and integrators maintaining or extending this bundle. Not user-facing product copy.
 
@@ -21,7 +21,7 @@ Unknown event types are skipped; text extraction is defensive (string, ContentBl
 
 ### Refs and blocks
 - Message ref: `m` + 1-based zero-padded 5-digit index **at ingestion time** (stable anchor;
-  surviving messages keep their labels after emergency truncation — the `byRef` label→index
+  surviving messages keep their labels after emergency truncation: the `byRef` label→index
   map is rebuilt after every truncation, so refs always resolve to the right surviving
   message, never to a shifted position).
 - Block: `{ blockId: blkNNNNN, tier: 1|2, topic, summary, sourceRefs | sourceBlockIds,
@@ -45,7 +45,7 @@ Unknown event types are skipped; text extraction is defensive (string, ContentBl
 
 ### Token math
 `estimateTokens = ceil(chars / 4)`. `renderedTokens = rawMessagesTokens − foldedTokens +
-activeSummaryTokens` — the quantity the gate and composition report.
+activeSummaryTokens`, the quantity the gate and composition report.
 
 ## Configuration (engine defaults, overridable via `createFoldTools({ config })`)
 
@@ -101,9 +101,9 @@ Every successful value passes through `output.render` → one `{ type: 'text' }`
 
 ## Test surface (private gate)
 
-- `tests/fold.test.js` — engine: refs, protection zones, blocks, tiers, gate math, search,
+- `tests/fold.test.js`: engine: refs, protection zones, blocks, tiers, gate math, search,
   truncation, surface-event normalization (pure fixtures, no host).
-- `tests/registry.test.js` — provider list/get, frontmatter re-parse, tool-definition shape
+- `tests/registry.test.js`: provider list/get, frontmatter re-parse, tool-definition shape
   against the DSH `ToolDefinition` contract, `apply()` against a mock `ctx` (assertions via
   `assert.ok` for boolean conditions).
 - Gate: `node --check` on all shipped JS; `node --test tests/`; positive/negative boot controls
