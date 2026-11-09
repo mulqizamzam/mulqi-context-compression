@@ -1,6 +1,6 @@
 # NOTICE: Concept Provenance
 
-Mulqi Context Compression v0.1.0 is an independent, clean-room product. It contains no code,
+Mulqi Context Compression v0.2.0 is an independent, clean-room product. It contains no code,
 prompt text, tests, or other copyrighted material from any other project.
 
 The concepts implemented here were studied from the publicly documented design of the
@@ -19,3 +19,8 @@ The concepts derived from that study are:
 Per the upstream license, and for transparent attribution, those concepts are acknowledged
 here. The code, documentation, and tooling in this product are original work by Mulqi and are
 licensed MIT (see LICENSE).
+
+Added in v0.2.0 and original to this project (no upstream material involved): the cross-session
+mycelium store (content-addressed digest blocks, an inverted token index, and the
+archived/dormant/active fidelity phases). The 8-hex block fingerprint is computed with FNV-1a,
+a public-domain hash algorithm (Fowler-Noll-Voth).

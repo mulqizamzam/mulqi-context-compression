@@ -1,5 +1,5 @@
 /**
- * Mulqi Context Compression — native DeepSeek Harness bundle.
+ * Mulqi Context Compression: native DeepSeek Harness bundle.
  *
  * Cordis plugin entry. On apply:
  *   1. registers the bundled doctrine skill (`mulqi-context-compression`)
@@ -12,13 +12,20 @@
  *   4. message ingestion uses ctx.get('sessionQuery').readSurface when the
  *      service is available and degrades to last-known state otherwise
  *      (boot is never blocked by its absence);
- *   5. decompress-to-file writes under the OS temp dir (host-readable).
+ *   5. decompress-to-file writes under the OS temp dir (host-readable);
+ *   6. cross-session mycelium store: a shared, content-addressed fold store
+ *      under $DSH_HOME/mulqi-cc-mycelium (or ~/.dsh/mulqi-cc-mycelium when
+ *      DSH_HOME is unset; override with MULQI_CC_MYCELIUM_DIR). Publishing
+ *      own blocks into it is off by default (enable with
+ *      MULQI_CC_MYCELIUM_PUBLISH=1); shared-scope recall works as long as
+ *      the store directory exists and is readable. The nearby-preview cap
+ *      defaults to 3 (override with MULQI_CC_MYCELIUM_NEARBY, 1..10).
  *
  * Zero runtime dependencies (Node builtins only).
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { makeProvider } from './lib/provider.js'
@@ -83,6 +90,18 @@ export function apply(ctx) {
     sessionKeyFor,
     writeFile: writeSink,
     config: undefined,
+    mycelium: {
+      dir:
+        process.env.MULQI_CC_MYCELIUM_DIR?.trim() ||
+        (process.env.DSH_HOME
+          ? path.join(process.env.DSH_HOME, 'mulqi-cc-mycelium')
+          : path.join(homedir(), '.dsh', 'mulqi-cc-mycelium')),
+      publish: process.env.MULQI_CC_MYCELIUM_PUBLISH === '1' || process.env.MULQI_CC_MYCELIUM_PUBLISH === 'true',
+      nearbyLimit: (() => {
+        const nl = Number(process.env.MULQI_CC_MYCELIUM_NEARBY)
+        return Number.isFinite(nl) && nl > 0 ? Math.min(nl, 10) : 3
+      })(),
+    },
   })
   for (const def of defs) disposers.push(ctx.tools.register(def))
 

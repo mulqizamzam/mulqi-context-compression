@@ -21,7 +21,7 @@ The recent working zone and the task's opening and latest user messages never fo
 |---|---|---|---|
 | `mulqi_cc_status` | Between task steps, or when context feels heavy | optional `truncateTo` (rare hard cap) | composition breakdown, compressible ranges with real sizes, block list, and (when the growth gate fires) a nudge with recommendations |
 | `mulqi_cc_compress` | After you finish consuming a range | `fromRef`, `toRef`, `topic`, `summary` (you write it), optional `tier`/`sourceBlockIds` | block id, compression ratio, tokens saved |
-| `mulqi_cc_search` | Before re-reading a file or re-running a command | `query`, optional `limit` | keyword hits across active block summaries + recent messages |
+| `mulqi_cc_search` | Before re-reading a file or re-running a command | `query`, optional `limit`, optional `scope: "shared"` | keyword hits across active block summaries + recent messages; with `scope: "shared"`, hits from other sessions' digest blocks in the shared fold store |
 | `mulqi_cc_decompress` | When a folded detail is needed again | `blockId` (`"list"` to enumerate), optional `fromRef`/`toRef` sub-range, optional `toFile: true` | restored text, or a file path (keeps context lean) |
 
 ## Timing: the growth gate
@@ -92,13 +92,38 @@ listing the blocks, and write one coarser summary of the phase. The consumed blo
 lineage (restorable in bulk later). Distill rarely: a tier-2 pass is a phase boundary, not a
 routine step.
 
+## Shared fold store (the mycelium)
+
+Digest blocks can be shared across sessions so a later session of the same user can recall
+settled work instead of re-deriving it. The shared store is a per-user directory of content
+addressed blocks with a token index. Publishing (writing your blocks into it) is **off by
+default** (privacy): the bundle ships with publishing disabled, and a configured store is
+readable for recall without it being enabled.
+
+- `mulqi_cc_status` reports `mycelium: "ok" | "off" | "unavailable"` for the store and lists
+  `nearby` when the store holds blocks that overlap this session's active work (topic + summary
+  token match, 0.15 Jaccard floor). Each entry names its `fp`, `topic`, `sessionKey`, and `phase`.
+- `mulqi_cc_search` with `scope: "shared"` recalls store blocks from other sessions; each hit
+  carries `fp`, `sessionKey`, `topic`, `snippet`, `accessCount`, and `phase`.
+- Every block carries a fidelity `phase`: `archived` (deactivated or tier-2 distilled), `active`
+  (restored at least once since publication), or `dormant` (published and untouched). Restoring a
+  block through `mulqi_cc_decompress` counts as a use and drives the phase.
+- Publishing failures never hide: the compress DTO reports `mycelium: "failed"` plus
+  `myceliumError` when a write into the store fails, and the engine compression itself still
+  succeeds.
+- Treat shared hits as *leads*, not ground truth: the block came from another session. Restore the
+  specific detail with `mulqi_cc_decompress` when you need it, and re-verify anything load-bearing
+  against the current repo state before acting on it.
+
 ## Restoration
 
 Before re-reading a file, re-running a command, or asking the user again: `mulqi_cc_search` with
 the exact identifiers (file name, error string, flag). If a hit points at a block, restore it:
 `toFile: true` when the payload is large (the path comes back instead of the text; read the file
 with your normal read tool), plain restore for a few lines. Restoring re-activates the original
-messages; the block steps aside.
+messages; the block steps aside. Shared-store blocks recalled via `scope: "shared"` come back as
+snippets and metadata (not full text): treat the hit as a pointer to what settled, and re-run or
+re-read the underlying source to confirm before acting.
 
 ## Anti-patterns
 

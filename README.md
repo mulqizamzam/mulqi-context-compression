@@ -2,14 +2,15 @@
 
 Native DeepSeek Harness plugin that compresses a long agent session by folding settled work
 into restorable digest blocks. The model writes each summary; the engine keeps every folded
-message addressable, so detail is recalled instead of lost.
+message addressable, so detail is recalled instead of lost. An optional shared store (the
+mycelium) carries those digest blocks between sessions of the same user.
 
 - Target host: DeepSeek Harness `0.2.1-rc.2` (exact pin; the host refuses the bundle on any
   other version)
 - Runtime: Node.js `>=22`, builtins only, zero runtime dependencies
 - Surfaces: one bundled doctrine skill (`mulqi-context-compression`, catalog rank 600) plus
   four native tools (`mulqi_cc_status`, `mulqi_cc_compress`, `mulqi_cc_decompress`,
-  `mulqi_cc_search`)
+  `mulqi_cc_search`), and the cross-session mycelium store (publishing off by default)
 
 ## What it does
 
@@ -91,14 +92,14 @@ This removes the pnpm dependency from the profile; the mount row disappears from
   actually running:
 
   ```bash
-  dsh plugin --profile <name> allow-version mulqi-context-compression@0.1.0 \
+  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.0 \
     --dsh-version <running-host-version> --accept-risk
   ```
 
   The host prints its own warning ("allowing incompatible plugin versions can break the
   application or corrupt data. Approval applies only to the exact package and DSH versions")
   and refuses to approve a version that is not the one currently running. Revoke the entry
-  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.1.0
+  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.0
   --dsh-version <version>`. An exemption is a persistent row in the profile's
   `compatibility.json`; prefer matching host versions over carrying exemptions.
 - **No mount row at all.** The bundle never registered: the install failed, or the profile
@@ -118,7 +119,34 @@ This removes the pnpm dependency from the profile; the mount row disappears from
   `toFile: true` for large payloads. The file variant returns a path, which keeps context lean.
 
 The bundled skill documents the full doctrine: timing rules, KEEP and DROP classes, protected
-zones, tiering, and anti-patterns. Read it first.
+zones, tiering, anti-patterns, and the shared-store etiquette below. Read it first.
+
+## Cross-session: the mycelium store
+
+A per-user directory of content-addressed digest blocks (`fp-<8hex>`, FNV-1a over the block's
+topic + summary key tokens) with an inverted token index. It is what makes cross-session recall
+possible: a later session can find settled work an earlier one compressed, instead of
+re-deriving it.
+
+- Location: `$DSH_HOME/mulqi-cc-mycelium`, or `~/.dsh/mulqi-cc-mycelium` when `DSH_HOME` is
+  unset. Override with `MULQI_CC_MYCELIUM_DIR`.
+- **Publishing is off by default.** A configured store is readable for recall without being
+  enabled, so a session can use the mycelium's memory without contributing to it. Enable
+  publishing per host with `MULQI_CC_MYCELIUM_PUBLISH=1`. The store lives under your user's
+  home, shared across all profiles on that host; treat it as user-private.
+- `mulqi_cc_status` reports `mycelium: "ok" | "off" | "unavailable"` and, when the store holds
+  work related to this session's active blocks (topic + summary token overlap, 0.15 Jaccard
+  floor), lists a `nearby` preview: `fp`, `topic`, `sessionKey`, `phase`.
+- `mulqi_cc_search` with `scope: "shared"` recalls store blocks from other sessions. Each hit
+  carries `fp`, `sessionKey`, `topic`, a 300-char `snippet`, `accessCount`, and `phase`.
+- Blocks carry a fidelity `phase`: `archived` (deactivated or tier-2 distilled), `active`
+  (restored at least once), `dormant` (published and untouched). Every `mulqi_cc_decompress`
+  of a block counts as a use and drives the phase.
+- Failures never hide: when a store write fails the compress DTO reports
+  `mycelium: "failed"` plus `myceliumError`, and the local compression still succeeds; when no
+  store is configured, shared recall returns `mycelium_unavailable` instead of a fake result.
+- Corrupted index entries degrade gracefully: the shared search counts them as `skipped`
+  instead of throwing, and missing block files are skipped, never fatal.
 
 ## Configuration
 
@@ -140,12 +168,21 @@ Every knob is overridable programmatically: `createFoldTools({ config })` in `li
 accepts overrides, so a host that composes the engine directly can retune gates without
 forking. Per-profile config wiring through the bundle patch row is not claimed in v1.
 
+The mycelium store is configured at host boot, not through the profile:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MULQI_CC_MYCELIUM_DIR` | `$DSH_HOME/mulqi-cc-mycelium` (or `~/.dsh/mulqi-cc-mycelium` when `DSH_HOME` is unset) | where the shared block store lives |
+| `MULQI_CC_MYCELIUM_PUBLISH` | off | set to `1` to write this host's digest blocks into the shared store |
+| `MULQI_CC_MYCELIUM_NEARBY` | `3` | cap on `nearby` previews in `mulqi_cc_status` |
+
 Token counting uses a documented `chars/4` heuristic, so there is no tokenizer dependency.
 
 ## What is in the bundle
 
 The `files` whitelist in `package.json` ships exactly: `index.js` (Cordis entry, registers the
-skill provider and four tools), `lib/**` (the fold engine, tool builder, skill provider),
+skill provider and four tools), `lib/**` (the fold engine, the mycelium DNA layer, the shared block store, tool builder,
+ and skill provider),
 `skills/**` (the doctrine skill), `cordis.patch.yml` (the bundle mount row), `docs/**`,
 `README.md`, `NOTICE.md`, `LICENSE`. The test suite (`tests/*.test.js`) and the private audit
 notes (`work/`) stay out of the published package.
@@ -156,22 +193,29 @@ shapes, and host wiring notes.
 ## Verify
 
 ```bash
-npm test          # node --test, 35 tests across fold engine, provider, and tool contract
-node --check index.js lib/fold.js lib/provider.js lib/tools.js
+npm test          # node --test, 55 tests across fold engine, provider, tool contract, and mycelium
+node --check index.js lib/fold.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
 ```
 
 The registry test suite also asserts that the private `work/` directory is not packaged and
 that the manifest pins the exact host version.
 
-## Known boundaries (v1)
+## Known boundaries
 
 - **No wire-level proxy:** compression state lives in-process per session. Host compaction, if
   configured, remains the backstop for overflow. The model-API cache economics of a proxy
   layout are out of scope for this native bundle.
-- **In-memory fold state:** blocks are not persisted across host restarts.
+- **In-memory fold state:** local blocks are not persisted across host restarts. The mycelium
+  store (when publishing is enabled) persists shared blocks to disk under the user's home, but
+  a block's own original messages still live only inside the session that compressed them.
 - **Tier-2 distillation is model-initiated:** the doctrine says when to promote; the engine
   does not auto-promote.
 - **Sub-agent lanes:** fold state is keyed per session, so a child agent sees its own lane.
+- **Mycelium privacy:** the store is user-private by location (no network), not by access
+  control: every profile on the same host and the same `DSH_HOME` reads and, when publishing
+  is enabled, writes the same directory. The store carries digest blocks (summaries + refs),
+  not raw transcripts; summaries still contain whatever the model put in them. Enable
+  publishing only on hosts where that trade is acceptable.
 
 ## License
 
