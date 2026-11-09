@@ -39,39 +39,72 @@ or a hidden prompt.
 
 ## Install (DSH 0.2.1-rc.2)
 
-`dsh plugin` forwards its arguments to pnpm inside the profile directory, so the install is an
-ordinary pnpm `add`. The profile is created on first use if it does not exist yet.
+`dsh plugin` forwards its arguments to pnpm inside the profile directory, so every form below
+is an ordinary pnpm `add`/`remove`. The profile is created on first use if it does not exist
+yet. The host registers the bundle from the package's `dsh.bundle` declaration on its own; no
+manifest editing is needed after the install.
+
+Pick the source that matches your situation:
 
 ```bash
-# 1. Install. Run from this directory so the relative path resolves.
+# From GitHub (the published package):
+dsh plugin --profile <name> add github:mulqizamzam/mulqi-context-compression
+
+# From a local checkout (run inside this repository):
 dsh plugin --profile <name> add .
 
-#    or install a published tarball / registry entry instead of the working copy:
-# dsh plugin --profile <name> add <pkg-name>@<version>
+# From a tarball or registry entry (pnpm form):
+dsh plugin --profile <name> add <pkg-name>@<version>
 ```
 
+Then confirm the mount and restart the profile's host:
+
 ```bash
-# 2. Confirm the bundle row is mounted. Expect a `mulqi-context-compression` entry
-#    and no "skipping" line for it.
+# Expect the mount row, and no skip line for this package.
 dsh --profile <name> --dump-config | grep -A1 mulqi-context-compression
-```
+#   # == mulqi-context-compression
+#   - id: mulqi-cc
 
-```bash
-# 3. Restart the profile's host so the new row is loaded.
+# Restart so the new row is loaded.
 dsh --profile <name>
 ```
 
 After the restart, the skill `mulqi-context-compression` appears in the session catalog and
 the four `mulqi_cc_*` tools appear in the tool registry for every agent in the profile.
 
-Two things the install does not do, by design:
+### Uninstall
 
-- **Install-time version check.** The pin lives in `package.json` as `dsh.engines.dsh:
-  "0.2.1-rc.2"`, which is an exact version and not a range. `pnpm add` accepts it on any host;
-  the host then rejects the row at mount time unless its own version is exactly `0.2.1-rc.2`.
-  Check with `dsh --version` before installing.
+```bash
+dsh plugin --profile <name> remove mulqi-context-compression
+```
+
+This removes the pnpm dependency from the profile; the mount row disappears from
+`--dump-config` on the next check.
+
+### Troubleshooting
+
+- **`dsh: skipping profile bundle "mulqi-context-compression": <reason>`** at boot. The host
+  writes one such line per skipped bundle to stderr. The most common reason is a host version
+  mismatch: the pin in `package.json` is `dsh.engines.dsh: "0.2.1-rc.2"`, an exact version, so
+  the row is refused on any other host. Check with `dsh --version`. The two ways forward:
+  run the matching host version, or grant an exact-version exemption on the host that is
+  actually running:
+
+  ```bash
+  dsh plugin --profile <name> allow-version mulqi-context-compression@0.1.0 \
+    --dsh-version <running-host-version> --accept-risk
+  ```
+
+  The host prints its own warning ("allowing incompatible plugin versions can break the
+  application or corrupt data. Approval applies only to the exact package and DSH versions")
+  and refuses to approve a version that is not the one currently running. Revoke the entry
+  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.1.0
+  --dsh-version <version>`. An exemption is a persistent row in the profile's
+  `compatibility.json`; prefer matching host versions over carrying exemptions.
+- **No mount row at all.** The bundle never registered: the install failed, or the profile
+  was not restarted. Re-run the install form and the `--dump-config` check.
 - **Config wiring.** The bundle mounts with the engine's defaults and exposes no config row
-  (see Configuration below).
+  (see Configuration below); per-profile wiring through the patch row is not claimed in v1.
 
 ## Usage
 
