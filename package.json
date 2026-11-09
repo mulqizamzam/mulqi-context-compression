@@ -1,0 +1,41 @@
+{
+  "name": "mulqi-context-compression",
+  "version": "0.1.0",
+  "description": "Model-driven, incremental, hierarchical context compression for DeepSeek Harness: bounded context windows, restorable digest blocks, long-lived sessions. One bundled doctrine skill plus four native tools (status, compress, decompress, search).",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib/**",
+    "skills/**",
+    "cordis.patch.yml",
+    "docs/**",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "context-compression",
+    "long-session",
+    "summarization",
+    "agent-memory"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": "0.2.1-rc.2"
+    }
+  }
+}

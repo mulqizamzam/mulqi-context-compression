@@ -1,0 +1,14 @@
+# Local reference snapshots — not part of the published plugin.
+# work/source is an unrelated package kept only for local comparison.
+work/
+
+# Local audit scratch and scan inventories.
+audit/
+
+# Dependencies and logs.
+node_modules/
+*.log
+
+# OS / editor noise.
+.DS_Store
+*.swp
