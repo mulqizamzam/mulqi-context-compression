@@ -562,22 +562,28 @@ test('RT-9: a status call with truncateTo reports the post-truncation compositio
   assert.equal(out.composition.messages, 8 - dropped, 'composition must reflect the post-truncation state')
 })
 
-test('RT-10: block writes refuse a symlink planted at the temp path', () => {
+test('RT-10: a symlink planted at a foreign or legacy temp name is never followed', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-tmp-'))
   try {
     const store = openMyceliumStore({ baseDir: dir })
     const dna = fingerprint('temp probe', 'victim must stay intact')
     const victim = path.join(dir, 'outside-victim.txt')
     writeFileSync(victim, 'ORIGINAL')
+    // legacy fixed temp name (pre-v0.2.5): a per-operation unique temp
+    // naming must leave a plant at the foreign name inert
     symlinkSync(victim, path.join(dir, 'blocks', `.${dna.id}.json.tmp`))
-    assert.throws(
-      () => store.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's', blockId: 'b', tier: 1, topic: 'temp probe', summary: 'victim must stay intact' }),
-      /symlink|unavailable/,
-      'writing through a planted temp symlink must be refused',
-    )
+    try {
+      store.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's', blockId: 'b', tier: 1, topic: 'temp probe', summary: 'victim must stay intact' })
+    } catch {
+      // a safe refusal of the whole publish is acceptable; writing THROUGH the plant is not
+    }
     assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL', 'the victim file outside the store stays untouched')
     const blockFile = path.join(dir, 'blocks', dna.id + '.json')
-    assert.ok(!existsSync(blockFile) || !lstatSync(blockFile).isSymbolicLink(), 'the block file must not be a symlink to the victim')
+    assert.ok(!existsSync(blockFile) || !lstatSync(blockFile).isSymbolicLink(), 'the block file must never be a symlink to the victim')
+    // a fresh fingerprint (no plant on its temp names) must publish cleanly
+    const dna2 = fingerprint('temp probe clean', 'second writer must land')
+    store.publishBlock({ fp: dna2.id, tokens: dna2.tokens, sessionKey: 's', blockId: 'b2', tier: 1, topic: 'temp probe clean', summary: 'second writer must land' })
+    assert.ok(existsSync(path.join(dir, 'blocks', dna2.id + '.json')), 'a clean publish must land on its own temp name')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -683,4 +689,91 @@ test('RT-15: the decompress contract names the official sub-range behaviour (cla
   const d = byName.decompress
   assert.match(d.description, /clamp/i, 'the description must state that resolvable out-of-block bounds clamp to the block span')
   assert.match(d.description, /reject/i, 'the description must state that unresolvable bounds are rejected')
+})
+
+const writeRaceScript = `
+  const { openMyceliumStore } = await import(process.env.STORE_URL)
+  const store = openMyceliumStore({ baseDir: process.env.STORE_DIR })
+  const dna = JSON.parse(process.env.DNA)
+  for (let i = 0; i < Number(process.env.ITER); i += 1) {
+    const rep = store.publishBlock({ fp: dna.fp, tokens: dna.tokens, sessionKey: 's' + process.env.W, blockId: 'b' + i, tier: 1, topic: dna.topic, summary: dna.summary })
+    if (rep.degradedTokens > 0) process.exit(3) // an index update was refused: the writer must not silently degrade
+  }
+`
+
+test('RT-16: concurrent writers targeting the same block file all land without clobbering each other', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-race-'))
+  const storeUrl = pathToFileURL(fileURLToPath(new URL('../lib/store.js', import.meta.url))).href
+  try {
+    const seed = openMyceliumStore({ baseDir: dir })
+    const dna = fingerprint('race probe', 'two writer contention check')
+    seed.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's0', blockId: 'b0', tier: 1, topic: 'race probe', summary: 'two writer contention check' })
+    const N = 4
+    const ITER = 30
+    const workers = []
+    for (let w = 0; w < N; w += 1) {
+      workers.push(new Promise((res, rej) => {
+        const p = spawn(process.execPath, ['--input-type=module', '-e', writeRaceScript], {
+          env: {
+            ...process.env,
+            STORE_DIR: dir,
+            STORE_URL: storeUrl,
+            DNA: JSON.stringify({ fp: dna.id, tokens: dna.tokens, topic: 'race probe', summary: 'two writer contention check' }),
+            W: String(w),
+            ITER: String(ITER),
+          },
+          stdio: 'pipe',
+        })
+        let err = ''
+        p.stderr.on('data', (d) => { err += d })
+        p.on('close', (code) => (code === 0 ? res() : rej(new Error(`writer ${w} exit ${code}: ${err}`))))
+      }))
+    }
+    await Promise.all(workers) // every writer must complete: a clobbered in-flight temp must surface, not hide
+    const out = openMyceliumStore({ baseDir: dir }).searchBlocks('race')
+    assert.equal(out.hits.length, 1, 'the store must hold the one block')
+    assert.match(out.hits[0].sessionKey, /^s[0-3]$/, 'last-writer-wins: one of the four writers\' records is live')
+    assert.ok(existsSync(path.join(dir, 'blocks', dna.id + '.json')), 'the block record file is present')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const gateScript = `
+  const { openMyceliumStore } = await import(process.env.STORE_URL)
+  const fs = await import('node:fs')
+  const store = openMyceliumStore({ baseDir: process.env.STORE_DIR })
+  while (!fs.existsSync(process.env.GATE)) await new Promise((r) => setTimeout(r, 10))
+  const dna = JSON.parse(process.env.DNA)
+  try {
+    store.publishBlock({ fp: dna.fp, tokens: dna.tokens, sessionKey: 's', blockId: 'b', tier: 1, topic: dna.topic, summary: dna.summary })
+  } catch { /* a safe refusal (ELOOP on our own temp) is the expected outcome */ }
+`
+
+test('RT-17: a symlink planted at this process own next temp name is refused, never followed', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-gate-'))
+  const storeUrl = pathToFileURL(fileURLToPath(new URL('../lib/store.js', import.meta.url))).href
+  try {
+    const seed = openMyceliumStore({ baseDir: dir })
+    const dna = fingerprint('gate probe', 'own temp symlink check')
+    seed.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's0', blockId: 'b0', tier: 1, topic: 'gate probe', summary: 'own temp symlink check' })
+    const gate = path.join(dir, 'gate')
+    const p = spawn(process.execPath, ['--input-type=module', '-e', gateScript], {
+      env: { ...process.env, STORE_DIR: dir, STORE_URL: storeUrl, GATE: gate, DNA: JSON.stringify({ fp: dna.id, tokens: dna.tokens, topic: 'gate probe', summary: 'own temp symlink check' }) },
+      stdio: 'pipe',
+    })
+    // the child's first store write takes temp seq 1 attempt 0; plant our
+    // symlink there while the child is still importing the module
+    const victim = path.join(dir, 'outside-victim.txt')
+    writeFileSync(victim, 'ORIGINAL')
+    const planted = path.join(dir, 'blocks', `.${dna.id}.json.tmp-${p.pid}-1-0`)
+    symlinkSync(victim, planted)
+    writeFileSync(gate, 'go')
+    await new Promise((res) => { p.on('close', res) })
+    assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL', 'the victim behind our own temp symlink stays untouched')
+    const blockFile = path.join(dir, 'blocks', dna.id + '.json')
+    assert.ok(!existsSync(blockFile) || !lstatSync(blockFile).isSymbolicLink(), 'the block must never land as a symlink to the victim')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

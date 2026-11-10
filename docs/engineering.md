@@ -45,9 +45,15 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
     own `fp` (recomputed FNV-1a, `fingerprintMatches` in `lib/mycelium.js`), or the record is
     treated as planted and rejected. Publish enforces the same check, so a mismatched record
     never lands on disk.
-  - Writes are atomic: an exclusive-created private temp (`O_EXCL | O_NOFOLLOW`, mode 0600)
-    plus rename under a 0700 dir. A symlink at the temp path is refused (never followed,
-    never truncated); a regular leftover temp from a crashed writer is reclaimed.
+  - Writes are atomic: a per-operation unique private temp
+    (`.<name>.tmp-<pid>-<seq>-<attempt>`) exclusive-created with `O_EXCL | O_NOFOLLOW`
+    (mode 0600), written through the descriptor, and renamed under a 0700 dir. The unique
+    name is the two-writer contract: a concurrent process writing the same file gets its
+    own temp and never touches this writer's in-flight one; a writer may unlink only the
+    temp it created itself. EEXIST on our exact name (planted file, pid reuse) skips to
+    the next name instead of deleting it; ELOOP (planted symlink) is a hard refusal; a
+    rename that finds its own temp gone retries with a fresh temp. Orphan temps from a
+    crashed writer are inert dot files, never read.
   - Index updates and fidelity counters are single `O_APPEND` lines through an
     `O_NOFOLLOW` open (helper `appendLine` in `lib/store.js`), so concurrent publishers and
     concurrent `bump()` calls cannot lose an entry, and a symlink planted at an index or

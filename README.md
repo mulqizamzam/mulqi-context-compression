@@ -92,14 +92,14 @@ This removes the pnpm dependency from the profile; the mount row disappears from
   actually running:
 
   ```bash
-  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.4 \
+  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.5 \
     --dsh-version <running-host-version> --accept-risk
   ```
 
   The host prints its own warning ("allowing incompatible plugin versions can break the
   application or corrupt data. Approval applies only to the exact package and DSH versions")
   and refuses to approve a version that is not the one currently running. Revoke the entry
-  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.4
+  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.5
   --dsh-version <version>`. An exemption is a persistent row in the profile's
   `compatibility.json`; prefer matching host versions over carrying exemptions.
 - **No mount row at all.** The bundle never registered: the install failed, or the profile
@@ -162,9 +162,10 @@ re-deriving it.
   too (one line per `remember: true` use under `count/<fp>`, derived at read time), so
   concurrent sessions cannot lose each other's increments either.
 - Store layout is write-secure: directories are created in mode 0700 and re-locked to 0700
-  on open; block files and index lines are exclusive-created (`O_EXCL`) into a private temp
-  and renamed, and a temp path that is, or was turned into, a symlink is refused, never
-  followed, never truncated. Append paths (token index lines, fidelity counters) open with
+  on open; block files and index lines are exclusive-created (`O_EXCL`) into a per-operation
+  unique private temp and renamed (a second writer to the same file gets its own temp and
+  never deletes the first writer's in-flight one), and a temp path that is, or was turned
+  into, a symlink is refused, never followed, never truncated. Append paths (token index lines, fidelity counters) open with
   `O_NOFOLLOW` so a symlink planted at those paths is refused the same way. Refused writes
   surface as `mycelium: "failed"` in the compress DTO, and `mulqi_cc_status` recomputes
   composition and nudge after an emergency truncation instead of reporting the
@@ -215,7 +216,7 @@ shapes, and host wiring notes.
 ## Verify
 
 ```bash
-npm test          # node --test, 71 tests across fold engine, provider, tool contract, and mycelium
+npm test          # node --test, 73 tests across fold engine, provider, tool contract, and mycelium
 node --check index.js lib/fold.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
 ```
 
