@@ -92,14 +92,14 @@ This removes the pnpm dependency from the profile; the mount row disappears from
   actually running:
 
   ```bash
-  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.0 \
+  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.2 \
     --dsh-version <running-host-version> --accept-risk
   ```
 
   The host prints its own warning ("allowing incompatible plugin versions can break the
   application or corrupt data. Approval applies only to the exact package and DSH versions")
   and refuses to approve a version that is not the one currently running. Revoke the entry
-  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.0
+  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.2
   --dsh-version <version>`. An exemption is a persistent row in the profile's
   `compatibility.json`; prefer matching host versions over carrying exemptions.
 - **No mount row at all.** The bundle never registered: the install failed, or the profile
