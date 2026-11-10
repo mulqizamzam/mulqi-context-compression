@@ -350,3 +350,43 @@ test('RT: composition counts only messages carried by a live block', () => {
   promoteTier(fold, { blockIds: [b1.blockId], topic: 'P', summary: 'p' })
   assert.equal(composition(fold).folded.messages, 0, 'block deactivated → messages no longer represented by a live summary')
 })
+
+test('RT-7: refs are minted monotonically and never recycled after truncation', () => {
+  const fold = createFold({ sessionKey: 'rt7', config: { recentZoneMessages: 1, recentZoneTokens: 0 } })
+  const msgs = [{ seq: 1, role: 'user', text: 'intent' }]
+  for (let i = 0; i < 10; i += 1) msgs.push({ seq: 2 + i, role: 'tool', toolName: 'bash', text: 'ORIG-' + (i + 2) + ' ' + 'x'.repeat(300) })
+  msgs.push({ seq: 12, role: 'user', text: 'last' })
+  ingest(fold, msgs)
+  const b = recordBlock(fold, { fromRef: 'm00008', toRef: 'm00009', topic: 'work', summary: 'settled work' })
+  assert.ok(b.ok, b?.error)
+  const t = emergencyTruncate(fold, 500)
+  assert.ok(t.dropped.length > 0, 'the fixture must actually drop messages')
+  ingest(fold, [{ seq: 100, role: 'tool', toolName: 'bash', text: 'IMPOSTOR-A payload' }])
+  ingest(fold, [{ seq: 101, role: 'tool', toolName: 'bash', text: 'IMPOSTOR-B payload' }])
+  const refs = fold.messages.map((m) => m.ref)
+  const dupes = [...new Set(refs.filter((r, i) => refs.indexOf(r) !== i))]
+  assert.equal(dupes.length, 0, 'no label may be carried by two live messages: ' + JSON.stringify(dupes))
+  const d = decompressBlock(fold, { blockId: b.blockId })
+  assert.ok(d.ok, d?.error)
+  assert.match(d.text, /ORIG-/, 'a pre-truncation block must restore its original messages')
+  assert.doesNotMatch(d.text, /IMPOSTOR/, 'recycled labels must not re-point the block at new messages')
+})
+
+test('RT-8: decompress sub-ranges reject unresolvable refs instead of clamping silently', () => {
+  const fold = createFold({ sessionKey: 'rt8', config: { recentZoneMessages: 1, recentZoneTokens: 0 } })
+  const msgs = [{ seq: 1, role: 'user', text: 'intent' }]
+  for (let i = 0; i < 8; i += 1) msgs.push({ seq: 2 + i, role: 'tool', toolName: 'bash', text: 'body ' + i })
+  msgs.push({ seq: 10, role: 'user', text: 'last' })
+  ingest(fold, msgs)
+  const b = recordBlock(fold, { fromRef: 'm00004', toRef: 'm00006', topic: 't', summary: 's' })
+  assert.ok(b.ok, b?.error)
+  const badFrom = decompressBlock(fold, { blockId: b.blockId, fromRef: 'm99999', toRef: 'm00006' })
+  assert.equal(badFrom.ok, false, 'an unresolvable fromRef must be rejected, not ignored')
+  assert.match(badFrom.error, /unknown fromRef/)
+  const badTo = decompressBlock(fold, { blockId: b.blockId, fromRef: 'm00004', toRef: 'm09999' })
+  assert.equal(badTo.ok, false, 'an unresolvable toRef must be rejected, not ignored')
+  assert.match(badTo.error, /unknown toRef/)
+  const clamped = decompressBlock(fold, { blockId: b.blockId, fromRef: 'm00001', toRef: 'm00010' })
+  assert.equal(clamped.ok, true, 'resolvable refs outside the block still clamp to it')
+  assert.deepEqual(clamped.restoredRefs, ['m00004', 'm00005', 'm00006'])
+})

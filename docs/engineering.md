@@ -29,20 +29,27 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
 
 ### Shared store (`lib/store.js`)
 - `openMyceliumStore({ baseDir })` → `{ publishBlock, searchBlocks, bump, listBlocks, reindex, stats, dir }`.
-  Layout: `blocks/<fp>.json` (one block per file) plus `tok/<fnv(token)>.json` (an inverted
-  index, one file per key-token hash). Index files use a line format (one fingerprint per
-  line); v0.2.0 JSON-array files are read transparently and migrated to lines on first write.
-- Fail-safe by construction (audit 2026-11-08, hardened by red team 2026-11-10):
-  - `baseDir` must be absolute and a real directory; a planted symlink at `blocks/` or `tok/`
-    is refused, not followed.
+  Layout: `blocks/<fp>.json` (one block per file), `tok/<fnv(token)>.json` (an inverted index,
+  one file per key-token hash), and `count/<fp>` (an append-only fidelity counter, one line
+  per `remember: true` use). Index files use a line format (one fingerprint per line);
+  v0.2.0 JSON-array files are read transparently and migrated to lines on first write.
+- Fail-safe by construction (audit 2026-11-08, hardened by red team 2026-11-10 and the
+  2026-11-10 external audit fixes):
+  - `baseDir` must be absolute and a real directory; a planted symlink at `blocks/`, `tok/`,
+    or `count/` is refused, not followed. All four directories are created in mode 0700 and
+    re-locked to 0700 on open; a looser pre-existing directory is secured (or the open is
+    refused when it cannot be secured).
   - Every file is `lstat`-checked at read time: a block or index file swapped for a symlink
     after open is skipped and counted, never followed.
   - Every block record is verified by content addressing: its stored tokens must hash to its
     own `fp` (recomputed FNV-1a, `fingerprintMatches` in `lib/mycelium.js`), or the record is
     treated as planted and rejected. Publish enforces the same check, so a mismatched record
     never lands on disk.
-  - Writes are atomic (temp file + rename under a 0700 dir). Index updates are single
-    `O_APPEND` lines, so concurrent publishers cannot lose an entry; duplicate lines are
+  - Writes are atomic: an exclusive-created private temp (`O_EXCL | O_NOFOLLOW`, mode 0600)
+    plus rename under a 0700 dir. A symlink at the temp path is refused (never followed,
+    never truncated); a regular leftover temp from a crashed writer is reclaimed.
+  - Index updates and fidelity counters are single `O_APPEND` lines, so concurrent
+    publishers and concurrent `bump()` calls cannot lose an entry; duplicate lines are
     de-duplicated at read time.
   - A corrupt index file is left untouched: the affected token is skipped for that write and
     counted in `stats.degradedTokens`; `reindex()` is the only supported repair (it rebuilds
@@ -54,7 +61,8 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
   snippet (300 chars), accessCount, phase }], skipped, degraded }`.
 - `listBlocks(limit?)` loads at most `limit` block files per call (readdir order, advisory
   preview); the status `nearby` preview passes a cap of 200.
-- `reindex()` → `{ blocks, tokens }`; rebuilds all `tok/` files from the block files.
+- `reindex()` → `{ blocks, tokens }`; rebuilds all `tok/` files from the block files and
+  drops `count/` files whose block is gone.
 
 ### Fidelity signal (`lib/fold.js`, `lib/store.js`)
 - Every local block carries an `accessCount` (starts at 0). Each successful
@@ -65,6 +73,12 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
   returned hit via `store.bump(fp)`. A shared recall without `remember` is read-only and
   does not move the phase. (Red team 2026-11-10 RT-4: an exported `bump()` with no call
   site is a dead signal, so the wiring is asserted in the test suite.)
+- Counter storage (v0.2.3, audit claim 4): `bump()` no longer rewrites the block record.
+  It appends one line to `count/<fp>` (`O_WRONLY|O_CREAT|O_APPEND`), and `readBlock`
+  derives the effective `accessCount` as the record's stored count plus the counter's line
+  count at read time. Appends from several processes can no longer overwrite each other
+  (the old read-modify-write path lost 44% of increments across four concurrent
+  processes in the audit PoC).
 
 ### Message normalization
 `surfaceEventsToMessages(events)` maps DSH `SessionSurfaceSnapshot.events` to
@@ -73,10 +87,13 @@ Unknown event types are skipped; text extraction is defensive (string, ContentBl
 `text`/image blocks, or JSON-fallback). `ingest(state, messages)` is idempotent by `seq`.
 
 ### Refs and blocks
-- Message ref: `m` + 1-based zero-padded 5-digit index **at ingestion time** (stable anchor;
-  surviving messages keep their labels after emergency truncation: the `byRef` label→index
+- Message ref: `m` + zero-padded 5-digit number minted from a monotonic per-fold counter
+  (stable anchor; the label space only grows, so labels of old blocks stay valid).
+  Surviving messages keep their labels after emergency truncation: the `byRef` label→index
   map is rebuilt after every truncation, so refs always resolve to the right surviving
-  message, never to a shifted position).
+  message, never to a shifted position. The monotonic counter (v0.2.3, audit claim 1)
+  prevents label recycling: a message ingested after a truncation always gets a new
+  label, so no block's `sourceRefs` can be re-pointed at different messages.
 - Block: `{ blockId: blkNNNNN, tier: 1|2, topic, summary, sourceRefs | sourceBlockIds,
   active, approxSummaryTokens, createdAt }`. Tier-2 blocks deactivate their source blocks
   (lineage retained for bulk restore).
@@ -127,7 +144,9 @@ must never see an empty composition and mistake it for "nothing happened".
   `host.mycelium.nearbyLimit`, default 3; the underlying read is bounded to 200 block files).
   When a store is configured but cannot be opened, `mycelium: 'unavailable'` plus
   `myceliumError`. `myceliumDegraded` (count) appears when read-side skips were recorded on
-  this store handle (symlinked files, integrity rejections, corrupt index reads).
+  this store handle (symlinked files, integrity rejections, corrupt index reads). With
+  `truncateTo`, the emergency truncation runs before the DTO is shaped, so `composition`,
+  `nudge` and `blocks` describe the post-truncation state (audit claim 5).
 - `mulqi_cc_compress` → `{ ok, blockId, tier, ratio, savedTokens, summaryTokens, nudge,
   mycelium: 'off' | 'ok' | 'failed', myceliumIndexDegraded? }` or `{ ok: false, code,
   detail }`. `code` is `compress` or `tier2`. A store write failure sets `mycelium:
@@ -135,7 +154,9 @@ must never see an empty composition and mistake it for "nothing happened".
   `myceliumIndexDegraded` (count) appears when one or more index updates had to be skipped
   because the target index file is corrupt.
 - `mulqi_cc_decompress` → `{ ok, blockId, restoredRefs, text | file }` or `{ ok, listed[] }`
-  when `blockId: "list"`. `toFile` writes under `<tmpdir>/mulqi-cc/<sessionKey>/`
+  when `blockId: "list"`. A `fromRef`/`toRef` bound that resolves to no live message
+  (truncated, or never ingested) returns `{ ok: false, error }` instead of silently
+  clamping (audit claim 2). `toFile` writes under `<tmpdir>/mulqi-cc/<sessionKey>/`
   (dir mode 0700; the file is exclusive-created with `wx` and never overwrites or follows
   a planted symlink; a free `-N` name is chosen when the base name exists).
 - `mulqi_cc_search` → `{ ok, hits: [{ kind, ref|id, tier?, topic?, score, snippet }] }` for
@@ -167,7 +188,8 @@ Every successful value passes through `output.render` → one `{ type: 'text' }`
   surfaced, never swallowed.
    Degradation counters are per store handle (per host process): `myceliumDegraded` in the status
    DTO and `myceliumIndexDegraded` in the compress DTO reflect skips seen by *this* process;
-   a cross-process view of store health requires `reindex()` (or, later, an on-disk counter).
+   a cross-process view of fidelity use counts lives on disk in the `count/` dir, derived
+   at read time (v0.2.3); the per-process degradation counters above remain advisory.
 - `ctx.get('sessionQuery')` is probed lazily, so boot never blocks. Absence is **reported**
   (`hostRead: 'unavailable'`) and a throwing read is **reported** (`hostRead: 'failed'` plus
   `hostReadError`); ingestion degrades to last-known state but the model is told.

@@ -4,7 +4,7 @@
  * to surface, never to silently succeed.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readdirSync, writeFileSync, mkdirSync, symlinkSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, writeFileSync, mkdirSync, symlinkSync, existsSync, readFileSync, lstatSync, chmodSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -547,6 +547,90 @@ test('RT-6: a legacy v0.2.0 JSON-array index migrates to lines on first publish'
     assert.ok(fps.includes(dna.id), 'the legacy entry survives the migration')
     assert.equal(new Set(fps).size, 2, 'legacy and new records both indexed')
     assert.equal(store.searchBlocks('sqlite').hits.length, 2, 'recall spans both records')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-9: a status call with truncateTo reports the post-truncation composition', async () => {
+  const { byName } = hostWithStore({ storeDir: undefined, publish: false })
+  const out = await byName.status.execute({ truncateTo: 40 }, {})
+  assert.equal(out.ok, true)
+  assert.ok(out.truncation && Array.isArray(out.truncation.dropped), 'truncateTo must run the emergency cap')
+  const dropped = out.truncation.dropped.length
+  assert.ok(dropped > 0, 'the fixture must drop at least one message')
+  assert.equal(out.composition.messages, 8 - dropped, 'composition must reflect the post-truncation state')
+})
+
+test('RT-10: block writes refuse a symlink planted at the temp path', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-tmp-'))
+  try {
+    const store = openMyceliumStore({ baseDir: dir })
+    const dna = fingerprint('temp probe', 'victim must stay intact')
+    const victim = path.join(dir, 'outside-victim.txt')
+    writeFileSync(victim, 'ORIGINAL')
+    symlinkSync(victim, path.join(dir, 'blocks', `.${dna.id}.json.tmp`))
+    assert.throws(
+      () => store.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's', blockId: 'b', tier: 1, topic: 'temp probe', summary: 'victim must stay intact' }),
+      /symlink|unavailable/,
+      'writing through a planted temp symlink must be refused',
+    )
+    assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL', 'the victim file outside the store stays untouched')
+    const blockFile = path.join(dir, 'blocks', dna.id + '.json')
+    assert.ok(!existsSync(blockFile) || !lstatSync(blockFile).isSymbolicLink(), 'the block file must not be a symlink to the victim')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const bumpScript = `
+  const { openMyceliumStore } = await import(process.env.STORE_URL)
+  const store = openMyceliumStore({ baseDir: process.env.STORE_DIR })
+  for (let i = 0; i < 25; i += 1) store.bump(process.env.FP)
+`
+
+test('RT-11: concurrent bumps lose no increments (append-only counter)', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-bump-'))
+  const storeUrl = pathToFileURL(fileURLToPath(new URL('../lib/store.js', import.meta.url))).href
+  try {
+    const seed = openMyceliumStore({ baseDir: dir })
+    const dna = fingerprint('bump probe', 'concurrent counter check')
+    seed.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's0', blockId: 'b0', tier: 1, topic: 'bump probe', summary: 'concurrent counter check' })
+    const workers = []
+    for (let w = 0; w < 4; w += 1) {
+      workers.push(new Promise((res, rej) => {
+        const p = spawn(process.execPath, ['--input-type=module', '-e', bumpScript], {
+          env: { ...process.env, STORE_DIR: dir, STORE_URL: storeUrl, FP: dna.id },
+          stdio: 'pipe',
+        })
+        let err = ''
+        p.stderr.on('data', (d) => { err += d })
+        p.on('close', (code) => (code === 0 ? res() : rej(new Error(err))))
+      }))
+    }
+    await Promise.all(workers)
+    const out = openMyceliumStore({ baseDir: dir }).searchBlocks('bump')
+    assert.equal(out.hits.length, 1)
+    assert.equal(out.hits[0].accessCount, 100, '4 x 25 concurrent bumps must all land (no lost updates)')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-12: pre-existing permissive store directories are secured to 0700 on open', () => {
+  if (process.platform === 'win32') {
+    console.log('skip RT-12: chmod mode bits are a no-op on win32')
+    return
+  }
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-perm-'))
+  try {
+    const blocks = path.join(dir, 'blocks')
+    mkdirSync(blocks, { mode: 0o777 })
+    chmodSync(blocks, 0o777)
+    chmodSync(dir, 0o777)
+    openMyceliumStore({ baseDir: dir })
+    assert.equal(lstatSync(blocks).mode & 0o777, 0o700, 'a world-readable blocks dir must be locked down')
+    assert.equal(lstatSync(dir).mode & 0o777, 0o700, 'the store root itself must be locked down')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

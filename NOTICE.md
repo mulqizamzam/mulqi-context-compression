@@ -1,6 +1,6 @@
 # NOTICE: Concept Provenance
 
-Mulqi Context Compression v0.2.2 is an independent, clean-room product. It contains no code,
+Mulqi Context Compression v0.2.3 is an independent, clean-room product. It contains no code,
 prompt text, tests, or other copyrighted material from any other project.
 
 The concepts implemented here were studied from the publicly documented design of the

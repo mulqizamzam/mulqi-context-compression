@@ -92,14 +92,14 @@ This removes the pnpm dependency from the profile; the mount row disappears from
   actually running:
 
   ```bash
-  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.2 \
+  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.3 \
     --dsh-version <running-host-version> --accept-risk
   ```
 
   The host prints its own warning ("allowing incompatible plugin versions can break the
   application or corrupt data. Approval applies only to the exact package and DSH versions")
   and refuses to approve a version that is not the one currently running. Revoke the entry
-  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.2
+  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.3
   --dsh-version <version>`. An exemption is a persistent row in the profile's
   `compatibility.json`; prefer matching host versions over carrying exemptions.
 - **No mount row at all.** The bundle never registered: the install failed, or the profile
@@ -117,6 +117,8 @@ This removes the pnpm dependency from the profile; the mount row disappears from
 - **Recall before redoing work:** `mulqi_cc_search` with exact identifiers.
 - **Restore:** `mulqi_cc_decompress` takes a whole block, a `fromRef`/`toRef` sub-range, or
   `toFile: true` for large payloads. The file variant returns a path, which keeps context lean.
+  A sub-range bound that resolves to no live message (already truncated, or never existed)
+  returns an explicit error instead of silently widening the restored range.
 
 The bundled skill documents the full doctrine: timing rules, KEEP and DROP classes, protected
 zones, tiering, anti-patterns, and the shared-store etiquette below. Read it first.
@@ -155,7 +157,15 @@ re-deriving it.
   store's `reindex()` (not exposed as a tool in v0.2.1).
 - Concurrent publishers cannot lose index entries: token indexes are append-only line files
   (one fingerprint per line, `O_APPEND`), so two sessions publishing at once degrade at worst
-  to duplicate lines, which the reader de-duplicates.
+  to duplicate lines, which the reader de-duplicates. Fidelity use counters are append-only
+  too (one line per `remember: true` use under `count/<fp>`, derived at read time), so
+  concurrent sessions cannot lose each other's increments either.
+- Store layout is write-secure: directories are created in mode 0700 and re-locked to 0700
+  on open; block files and index lines are exclusive-created (`O_EXCL`) into a private temp
+  and renamed, and a temp path that is, or was turned into, a symlink is refused, never
+  followed, never truncated. Refused writes surface as `mycelium: "failed"` in the compress
+  DTO, and `mulqi_cc_status` recomputes composition and nudge after an emergency truncation
+  instead of reporting the pre-truncation state.
 
 ## Configuration
 
@@ -202,7 +212,7 @@ shapes, and host wiring notes.
 ## Verify
 
 ```bash
-npm test          # node --test, 62 tests across fold engine, provider, tool contract, and mycelium
+npm test          # node --test, 68 tests across fold engine, provider, tool contract, and mycelium
 node --check index.js lib/fold.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
 ```
 
