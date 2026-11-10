@@ -8,7 +8,7 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
 |---|---|---|
 | `index.js` | `name`, `inject`, `apply(ctx)` | Cordis entry: registers skill provider + 4 tools; wires host services and the mycelium store config |
 | `lib/fold.js` | `createFold`, `ingest`, `recordBlock`, `decompressBlock`, `searchContext`, `nudgeFor`, `composition`, `promoteTier`, `emergencyTruncate`, `stats`, `estimateTokens`, `surfaceEventsToMessages`, `DEFAULTS` | Pure fold engine (zero deps, no I/O, no clock) |
-| `lib/mycelium.js` | `keyTokens`, `fnv`, `fingerprint`, `overlap`, `rankNearby`, `phaseFor`, `NEARBY_THRESHOLD` | Pure DNA layer: content-addressed block ids, token overlap, fidelity phases |
+| `lib/mycelium.js` | `keyTokens`, `fnv`, `fingerprint`, `fingerprintMatches`, `overlap`, `rankNearby`, `phaseFor`, `NEARBY_THRESHOLD` | Pure DNA layer: content-addressed block ids, token overlap, fidelity phases |
 | `lib/store.js` | `openMyceliumStore` | Shared block store I/O (atomic writes, token index, fail-safe validation) |
 | `lib/tools.js` | `createFoldTools(host)` | Builds the 4 `ToolDefinition`s over a host adapter (incl. `host.mycelium`) |
 | `lib/provider.js` | `makeProvider`, `parseFrontmatter`, `stripFrontmatter` | Bundled skill provider; catalog entry derived from SKILL.md frontmatter |
@@ -28,18 +28,43 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
   `active` when `stats.accesses > 0`; else `dormant`.
 
 ### Shared store (`lib/store.js`)
-- `openMyceliumStore({ baseDir })` → `{ publishBlock, searchBlocks, bump, listBlocks, dir }`.
+- `openMyceliumStore({ baseDir })` → `{ publishBlock, searchBlocks, bump, listBlocks, reindex, stats, dir }`.
   Layout: `blocks/<fp>.json` (one block per file) plus `tok/<fnv(token)>.json` (an inverted
-  index, one file per key-token hash).
-- Fail-safe by construction: `baseDir` must be absolute and a real directory; a planted
-  symlink at `blocks/` or `tok/` is refused, not followed. Writes are atomic (temp file +
-  rename under a 0700 dir). Corrupt or missing index entries count as `skipped`, never throw.
+  index, one file per key-token hash). Index files use a line format (one fingerprint per
+  line); v0.2.0 JSON-array files are read transparently and migrated to lines on first write.
+- Fail-safe by construction (audit 2026-11-08, hardened by red team 2026-11-10):
+  - `baseDir` must be absolute and a real directory; a planted symlink at `blocks/` or `tok/`
+    is refused, not followed.
+  - Every file is `lstat`-checked at read time: a block or index file swapped for a symlink
+    after open is skipped and counted, never followed.
+  - Every block record is verified by content addressing: its stored tokens must hash to its
+    own `fp` (recomputed FNV-1a, `fingerprintMatches` in `lib/mycelium.js`), or the record is
+    treated as planted and rejected. Publish enforces the same check, so a mismatched record
+    never lands on disk.
+  - Writes are atomic (temp file + rename under a 0700 dir). Index updates are single
+    `O_APPEND` lines, so concurrent publishers cannot lose an entry; duplicate lines are
+    de-duplicated at read time.
+  - A corrupt index file is left untouched: the affected token is skipped for that write and
+    counted in `stats.degradedTokens`; `reindex()` is the only supported repair (it rebuilds
+    every index from the block files and drops orphans).
+  - Missing or skipped block files count as `skipped` in `searchBlocks`; read-side skips and
+    integrity rejections count in `stats.degraded`.
+- `publishBlock(b)` → `{ degradedTokens }` (number of index updates skipped this call).
 - `searchBlocks(query, cap)` → `{ hits: [{ fp, sessionKey, blockId, tier, topic, score,
-  snippet (300 chars), accessCount, phase }], skipped }`.
+  snippet (300 chars), accessCount, phase }], skipped, degraded }`.
+- `listBlocks(limit?)` loads at most `limit` block files per call (readdir order, advisory
+  preview); the status `nearby` preview passes a cap of 200.
+- `reindex()` → `{ blocks, tokens }`; rebuilds all `tok/` files from the block files.
 
-### Fidelity signal (`lib/fold.js`)
-- Every block carries an `accessCount` (starts at 0). Each successful `decompressBlock`
-  increments it; the status and shared-search DTOs derive the `phase` from it.
+### Fidelity signal (`lib/fold.js`, `lib/store.js`)
+- Every local block carries an `accessCount` (starts at 0). Each successful
+  `decompressBlock` increments it; the status and shared-search DTOs derive the `phase`
+  from it.
+- Shared store blocks carry their own `accessCount`. It advances only through an explicit
+  use signal: `mulqi_cc_search` with `scope: "shared"` and `remember: true` bumps every
+  returned hit via `store.bump(fp)`. A shared recall without `remember` is read-only and
+  does not move the phase. (Red team 2026-11-10 RT-4: an exported `bump()` with no call
+  site is a dead signal, so the wiring is asserted in the test suite.)
 
 ### Message normalization
 `surfaceEventsToMessages(events)` maps DSH `SessionSurfaceSnapshot.events` to
@@ -96,24 +121,31 @@ Every successful DTO also carries the host-read health:
 must never see an empty composition and mistake it for "nothing happened".
 
 - `mulqi_cc_status` → `{ ok, sessionKey, hostRead, composition, nudge, blocks[] (each with
-  `phase`), mycelium: 'ok' | 'off' | 'unavailable', nearby?, publish, truncation? }`.
-  `nearby` is null when the store holds nothing related to this session's active blocks, else
-  `[{ fp, score, topic, sessionKey, phase }]` (capped by `host.mycelium.nearbyLimit`,
-  default 3). When a store is configured but cannot be opened, `mycelium: 'unavailable'`
-  plus `myceliumError`.
+  `phase`), mycelium: 'ok' | 'off' | 'unavailable', myceliumDegraded?, nearby?, publish,
+  truncation? }`. `nearby` is null when the store holds nothing related to this session's
+  active blocks, else `[{ fp, score, topic, sessionKey, phase }]` (capped by
+  `host.mycelium.nearbyLimit`, default 3; the underlying read is bounded to 200 block files).
+  When a store is configured but cannot be opened, `mycelium: 'unavailable'` plus
+  `myceliumError`. `myceliumDegraded` (count) appears when read-side skips were recorded on
+  this store handle (symlinked files, integrity rejections, corrupt index reads).
 - `mulqi_cc_compress` → `{ ok, blockId, tier, ratio, savedTokens, summaryTokens, nudge,
-  mycelium: 'off' | 'ok' | 'failed' }` or `{ ok: false, code, detail }`. `code` is
-  `compress` or `tier2`. A store write failure sets `mycelium: 'failed'` plus `myceliumError`
-  without rolling back the local compression.
+  mycelium: 'off' | 'ok' | 'failed', myceliumIndexDegraded? }` or `{ ok: false, code,
+  detail }`. `code` is `compress` or `tier2`. A store write failure sets `mycelium:
+  'failed'` plus `myceliumError` without rolling back the local compression.
+  `myceliumIndexDegraded` (count) appears when one or more index updates had to be skipped
+  because the target index file is corrupt.
 - `mulqi_cc_decompress` → `{ ok, blockId, restoredRefs, text | file }` or `{ ok, listed[] }`
   when `blockId: "list"`. `toFile` writes under `<tmpdir>/mulqi-cc/<sessionKey>/`
   (dir mode 0700; the file is exclusive-created with `wx` and never overwrites or follows
   a planted symlink; a free `-N` name is chosen when the base name exists).
 - `mulqi_cc_search` → `{ ok, hits: [{ kind, ref|id, tier?, topic?, score, snippet }] }` for
   the default local scope, or `{ ok, scope: 'shared', sessionKey, hostRead, hits:
-  [{ fp, sessionKey, blockId, tier, topic, score, snippet, accessCount, phase }], skipped }`
-  when `scope: 'shared'` and a store is configured. When `scope: 'shared'` but no store is
-  configured the DTO is `{ ok: false, code: 'mycelium_unavailable', detail }`.
+  [{ fp, sessionKey, blockId, tier, topic, score, snippet, accessCount, phase }],
+  remembered?, skipped, degraded? }` when `scope: 'shared'` and a store is configured.
+  The optional `remember: true` argument counts each returned hit as a use (bumps its stored
+  `accessCount`, advancing its fidelity phase); the DTO reports `remembered` with the count.
+  When `scope: 'shared'` but no store is configured the DTO is `{ ok: false, code:
+  'mycelium_unavailable', detail }`.
 - Any tool called without an agent identity returns `{ ok: false, code: 'no_session_identity' }`
   instead of falling back to a shared bucket.
 
@@ -152,9 +184,11 @@ Every successful value passes through `output.render` → one `{ type: 'text' }`
   against the DSH `ToolDefinition` contract, `apply()` against a mock `ctx` (assertions via
   `assert.ok` for boolean conditions).
 - `tests/mycelium.test.js`: the DNA layer (keyTokens, fingerprint, overlap, rankNearby,
-  phaseFor), the shared store I/O (atomic write, token index, symlink refusal, path
-  confinement, graceful degradation on corrupt indexes), and the tool-level integration
-  (publish on/off, shared-scope recall, nearby in status, fidelity signal via
-  `decompressBlock` incrementing `accessCount`).
+  phaseFor), the shared store I/O (atomic write, append-only token index, symlink refusal at
+  directory and file level, path confinement, content-addressing rejection, non-destructive
+  handling of corrupt indexes + `reindex()`, a concurrent-publisher regression, bounded
+  `listBlocks`), and the tool-level integration (publish on/off, shared-scope recall,
+  `remember`-driven fidelity, nearby in status, `accessCount` advanced via `decompressBlock`
+  for local blocks). Red-team regression tests are labelled `RT-1` through `RT-5`.
 - Gate: `node --check` on all shipped JS; `node --test tests/`; positive/negative boot controls
   in a scratch `DSH_HOME`; `dsh --dump-config` mount check. No system install, no publish.

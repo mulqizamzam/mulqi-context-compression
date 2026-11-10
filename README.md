@@ -138,15 +138,24 @@ re-deriving it.
   work related to this session's active blocks (topic + summary token overlap, 0.15 Jaccard
   floor), lists a `nearby` preview: `fp`, `topic`, `sessionKey`, `phase`.
 - `mulqi_cc_search` with `scope: "shared"` recalls store blocks from other sessions. Each hit
-  carries `fp`, `sessionKey`, `topic`, a 300-char `snippet`, `accessCount`, and `phase`.
+  carries `fp`, `sessionKey`, `topic`, a 300-char `snippet`, `accessCount`, and `phase`. Pass
+  `remember: true` when that recall actually shaped the next action: each hit is then counted as
+  a use and its fidelity phase advances.
 - Blocks carry a fidelity `phase`: `archived` (deactivated or tier-2 distilled), `active`
-  (restored at least once), `dormant` (published and untouched). Every `mulqi_cc_decompress`
-  of a block counts as a use and drives the phase.
+  (used at least once), `dormant` (published and untouched). For local blocks every
+  `mulqi_cc_decompress` counts as a use; for shared blocks the use is counted when a session
+  recalls with `remember: true`.
 - Failures never hide: when a store write fails the compress DTO reports
   `mycelium: "failed"` plus `myceliumError`, and the local compression still succeeds; when no
   store is configured, shared recall returns `mycelium_unavailable` instead of a fake result.
-- Corrupted index entries degrade gracefully: the shared search counts them as `skipped`
-  instead of throwing, and missing block files are skipped, never fatal.
+- A corrupt index file is never destructively rebuilt: the affected token is skipped for that
+  write and the compress DTO surfaces `myceliumIndexDegraded`; `mulqi_cc_status` surfaces
+  `myceliumDegraded` for read-side skips (missing block files, swapped symlink files,
+  records whose tokens do not hash to their own fingerprint). The explicit repair path is the
+  store's `reindex()` (not exposed as a tool in v0.2.1).
+- Concurrent publishers cannot lose index entries: token indexes are append-only line files
+  (one fingerprint per line, `O_APPEND`), so two sessions publishing at once degrade at worst
+  to duplicate lines, which the reader de-duplicates.
 
 ## Configuration
 
@@ -193,7 +202,7 @@ shapes, and host wiring notes.
 ## Verify
 
 ```bash
-npm test          # node --test, 55 tests across fold engine, provider, tool contract, and mycelium
+npm test          # node --test, 61 tests across fold engine, provider, tool contract, and mycelium
 node --check index.js lib/fold.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
 ```
 
@@ -216,6 +225,15 @@ that the manifest pins the exact host version.
   is enabled, writes the same directory. The store carries digest blocks (summaries + refs),
   not raw transcripts; summaries still contain whatever the model put in them. Enable
   publishing only on hosts where that trade is acceptable.
+- **Mycelium fingerprints are 32-bit FNV-1a:** two different digests can hash to the same
+  `fp-<8hex>` slot, in which case the later publish overwrites the block file and the token
+  indexes point both digests at the surviving record. At user scale the birthday collision
+  probability is negligible; the policy is last-writer-wins, documented here instead of
+  silently engineered around.
+- **The store has no eviction:** published blocks stay until you delete the store directory.
+  The `nearby` preview in `mulqi_cc_status` is a bounded read (at most 200 block files per
+  call), so status cost stays flat as the store grows; full-store operations like `reindex()`
+  are paid only when you run them.
 
 ## License
 

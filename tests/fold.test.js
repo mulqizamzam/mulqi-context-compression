@@ -1,5 +1,5 @@
 /**
- * Fold engine — unit tests (pure fixtures, no host, no I/O).
+ * Fold engine: unit tests (pure fixtures, no host, no I/O).
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
@@ -108,7 +108,7 @@ test('effective floor drops to 45% of floor when pending mass is below the floor
     sessionKey: 's1',
     config: { windowTokens: 1000, gateFloorTokens: 400, effectiveFloorFraction: 0.45, windowFloorFraction: 0.45, recentZoneMessages: 1, recentZoneTokens: 0 },
   })
-  ingest(fold, sessionMessages(6, 100)) // ~600 total, growth ~600, pending mass < 400? mass = 600+ (user msgs) — make mass small:
+  ingest(fold, sessionMessages(6, 100)) // ~600 total, growth ~600, pending mass < 400? mass = 600+ (user msgs) make mass small:
   const nudge = nudgeFor(fold)
   assert.ok(typeof nudge.gate.effectiveFloorTokens === 'number')
   assert.ok(nudge.gate.effectiveFloorTokens === 180 || nudge.gate.effectiveFloorTokens === 400)
@@ -207,7 +207,7 @@ test('composition reports roles, folded counts and ranges', () => {
   const c = composition(fold)
   assert.equal(c.messages, 6)
   assert.equal(c.folded.messages, 4)
-  assert.equal(c.ranges.length, 0, 'the only clean run is now folded — nothing left to compress')
+  assert.equal(c.ranges.length, 0, 'the only clean run is now folded; nothing left to compress')
   assert.ok(c.renderedTokens < c.totalTokens)
 })
 
@@ -304,7 +304,7 @@ test('decompressing a distilled tier-2 block is rejected with a pointer to its s
   const t2 = promoteTier(fold, { blockIds: [b1.blockId], topic: 'distilled', summary: 'A landed' })
   assert.ok(t2.ok, t2.error)
   const out = decompressBlock(fold, { blockId: t2.blockId })
-  assert.ok(!out.ok, 'tier-2 blocks carry no message refs — they must not silently deactivate')
+  assert.ok(!out.ok, 'tier-2 blocks carry no message refs; they must not silently deactivate')
   assert.match(out.error, /distilled block/)
 })
 

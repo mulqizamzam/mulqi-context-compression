@@ -1,4 +1,4 @@
-# Mulqi Context Compression — DSH bundle patch layer.
+# Mulqi Context Compression: DSH bundle patch layer.
 #
 # Mounts the fold (doctrine skill + four native tools) into every profile
 # that lists this package in dsh.profile.bundles. The row's `name` is this

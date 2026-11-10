@@ -4,7 +4,9 @@
  * to surface, never to silently succeed.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readdirSync, writeFileSync, mkdirSync, symlinkSync, chmodSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, writeFileSync, mkdirSync, symlinkSync, existsSync, readFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -125,7 +127,7 @@ test('store: search on empty store is an honest empty result, not an error', () 
   const { dir, store } = mkStore()
   try {
     const r = store.searchBlocks('anything at all')
-    assert.deepEqual(r, { hits: [], skipped: 0 })
+    assert.deepEqual(r, { hits: [], skipped: 0, degraded: 0 })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -265,8 +267,11 @@ test('tools: compress with publish on writes one block; store failure is surface
     assert.equal(out.mycelium, 'ok')
     assert.equal(readdirSync(path.join(dir, 'blocks')).filter((n) => n.endsWith('.json')).length, 1)
 
-    // break the store and show a publish failure is reported, not hidden
-    chmodSync(path.join(dir, 'blocks'), 0o500)
+    // break the store in a root-safe way: swap the blocks dir for a plain
+    // file. A fresh handle must refuse to open it, and the failure must be
+    // surfaced in the DTO instead of hidden (chmod cannot block root).
+    rmSync(path.join(dir, 'blocks'), { recursive: true, force: true })
+    writeFileSync(path.join(dir, 'blocks'), 'not a directory')
     const broken = hostWithStore({ storeDir: dir, publish: true })
     const out2 = await broken.byName.compress.execute(
       { fromRef: 'm00002', toRef: 'm00003', topic: 'build fix', summary: 'sqlite lock timeout in ci, documented as flake' },
@@ -275,7 +280,6 @@ test('tools: compress with publish on writes one block; store failure is surface
     assert.equal(out2.ok, true, 'the engine compression still succeeds')
     assert.equal(out2.mycelium, 'failed', 'store failure is surfaced in the DTO')
     assert.ok(out2.myceliumError, 'and the reason is present')
-    chmodSync(path.join(dir, 'blocks'), 0o700)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -369,4 +373,160 @@ test('engine: decompressBlock bumps accessCount (fidelity signal for phase)', ()
   const d1 = decompressBlock(fold, { blockId: out.blockId, fromRef: 'm00002', toRef: 'm00003' })
   assert.equal(d1.ok, true)
   assert.equal(block.accessCount, 1, 'a sub-range restore counts as a use')
+})
+
+// ---------- red team regressions (2026-11-10) ----------
+
+const readText = (p) => readFileSync(p, 'utf8')
+
+test('RT-1: a symlinked block file is skipped and counted, never followed', () => {
+  const { dir, store } = mkStore()
+  const evilDir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-evil-'))
+  try {
+    const dna = fingerprint('build fix', 'sqlite lock timeout in ci')
+    publish(store, dna, { sessionKey: 's1', blockId: 'b1', tier: 1, topic: 'build fix', summary: 'sqlite lock timeout in ci' })
+    const evilFile = path.join(evilDir, 'evil.json')
+    writeFileSync(evilFile, JSON.stringify({
+      fp: dna.id, sessionKey: 'evil', blockId: 'blkEVIL', tier: 1,
+      topic: 'passwords', summary: 'LEAKED via symlink: db_admin password hunter2',
+      tokens: dna.tokens, sourceRefs: [], approxSummaryTokens: 0, accessCount: 0,
+    }))
+    const slot = path.join(dir, 'blocks', `${dna.id}.json`)
+    rmSync(slot)
+    symlinkSync(evilFile, slot)
+    const r = store.searchBlocks('sqlite lock timeout')
+    assert.ok(!r.hits.some((h) => h.sessionKey === 'evil'), 'the attacker record must not be served')
+    assert.equal(r.hits.length, 0, 'the real block was replaced by the symlink and is therefore gone')
+    assert.ok(r.degraded >= 1, 'the swapped file is counted as degradation, not silently followed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(evilDir, { recursive: true, force: true })
+  }
+})
+
+test('RT-1b: a planted block file whose tokens do not hash to its fp is rejected', () => {
+  const { dir, store } = mkStore()
+  try {
+    // fp-67f63757 is the fingerprint of the token pair alpha+beta; a record
+    // claiming that fp with different tokens is structurally impossible.
+    writeFileSync(path.join(dir, 'blocks', 'fp-67f63757.json'), JSON.stringify({
+      fp: 'fp-67f63757', sessionKey: 'evil', blockId: 'blkPLANT', tier: 1,
+      topic: 'passwords', summary: 'planted plain file, not a symlink',
+      tokens: ['gamma'], sourceRefs: [], approxSummaryTokens: 0, accessCount: 0,
+    }))
+    // index it under "gamma" so the read path is forced to load it
+    writeFileSync(path.join(dir, 'tok', `${fnv('gamma')}.json`), 'fp-67f63757\n')
+    const r = store.searchBlocks('gamma')
+    assert.equal(r.hits.length, 0, 'content addressing rejects the planted record')
+    assert.ok(r.degraded >= 1, 'the rejection is visible, not silent')
+    assert.throws(
+      () => publish(store, { id: 'fp-67f63757', tokens: ['gamma'] }, { sessionKey: 's', blockId: 'b', tier: 1, topic: 'x', summary: 'y' }),
+      { code: 'store_invalid' },
+      'publish enforces the same integrity check at the door',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-2: a corrupt index file is left untouched; reindex() is the explicit repair', () => {
+  const { dir, store } = mkStore()
+  try {
+    publish(store, fingerprint('a one', 'sqlite lock timeout alpha'), { sessionKey: 's1', blockId: 'b1', tier: 1, topic: 'a one', summary: 'sqlite lock timeout alpha' })
+    publish(store, fingerprint('b two', 'sqlite lock timeout beta'), { sessionKey: 's2', blockId: 'b2', tier: 1, topic: 'b two', summary: 'sqlite lock timeout beta' })
+    const tokFile = path.join(dir, 'tok', `${fnv('sqlite')}.json`)
+    writeFileSync(tokFile, '{"corrupt":true}')
+    const pr = publish(store, fingerprint('c three', 'sqlite lock timeout gamma'), { sessionKey: 's3', blockId: 'b3', tier: 1, topic: 'c three', summary: 'sqlite lock timeout gamma' })
+    assert.equal(pr.degradedTokens, 1, 'the corrupt token index is skipped, not overwritten')
+    assert.equal(readText(tokFile), '{"corrupt":true}', 'the corrupt file is preserved for inspection')
+    assert.equal(store.searchBlocks('sqlite').hits.length, 0, 'recall through the corrupt index is degraded but visible')
+    const rep = store.reindex()
+    assert.equal(rep.blocks, 3, 'reindex recovers all blocks from the block files')
+    assert.equal(store.searchBlocks('sqlite').hits.length, 3, 'recall is restored after reindex')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-3: concurrent publishers lose no index entries (append-only index)', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-conc-'))
+  const storeUrl = pathToFileURL(fileURLToPath(new URL('../lib/store.js', import.meta.url))).href
+  const mycUrl = pathToFileURL(fileURLToPath(new URL('../lib/mycelium.js', import.meta.url))).href
+  try {
+    const workers = []
+    for (let w = 0; w < 4; w += 1) {
+      workers.push(new Promise((res, rej) => {
+        const p = spawn(process.execPath, ['--input-type=module', '-e', concScript], {
+          env: { ...process.env, STORE_DIR: dir, STORE_URL: storeUrl, MYC_URL: mycUrl, WORKER: String(w) },
+          stdio: 'pipe',
+        })
+        let err = ''
+        p.stderr.on('data', (d) => { err += d })
+        p.on('close', (code) => (code === 0 ? res() : rej(new Error(err))))
+      }))
+    }
+    await Promise.all(workers)
+    const idxFile = path.join(dir, 'tok', `${fnv('sharedtoken')}.json`)
+    const lines = readText(idxFile).trim().split('\n').filter((l) => /^fp-[0-9a-f]{8}$/.test(l))
+    assert.equal(new Set(lines).size, 100, '4 x 25 publishes lose no index entry under contention')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const concScript = `
+  const { openMyceliumStore } = await import(process.env.STORE_URL)
+  const { fingerprint } = await import(process.env.MYC_URL)
+  const store = openMyceliumStore({ baseDir: process.env.STORE_DIR })
+  const w = Number(process.env.WORKER)
+  for (let i = 0; i < 25; i += 1) {
+    const k = w * 25 + i
+    // 4-char padded tag so every block has a distinct key-token set
+    const tag = String(k).padStart(4, 'z')
+    const topic = \`sharedtoken case \${tag}\`
+    const summary = \`sharedtoken settled work \${tag}\`
+    const dna = fingerprint(topic, summary)
+    store.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: \`w\${w}\`, blockId: \`b\${k}\`, tier: 1, topic, summary })
+  }
+`
+
+test('RT-4: shared recall with remember:true bumps the hit and advances its phase', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-rem-'))
+  try {
+    const pubStore = openMyceliumStore({ baseDir: dir })
+    const dna = fingerprint('build fix', 'sqlite lock timeout in ci')
+    publish(pubStore, dna, { sessionKey: 's1', blockId: 'b1', tier: 1, topic: 'build fix', summary: 'sqlite lock timeout in ci' })
+    const { byName } = hostWithStore({ storeDir: dir, publish: false })
+    const out = await byName.search.execute({ query: 'sqlite lock timeout', scope: 'shared', remember: true }, {})
+    assert.equal(out.ok, true)
+    assert.equal(out.remembered, 1, 'the hit is counted as a use')
+    assert.equal(out.hits[0].accessCount, 0, 'the bump lands after the DTO is shaped, so the returned count is pre-bump')
+    const after = openMyceliumStore({ baseDir: dir }).searchBlocks('sqlite lock timeout')
+    assert.equal(after.hits[0].accessCount, 1, 'the stored access count advanced')
+    assert.equal(after.hits[0].phase, 'active', 'and the fidelity phase moved dormant to active')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-5: listBlocks respects its read cap; reindex drops orphaned index lines', () => {
+  const { dir, store } = mkStore()
+  try {
+    // pad the index into a 4-char token so all 30 blocks get distinct fps
+    // (1-3 char numbers are dropped by the key-token extractor)
+    for (let i = 0; i < 30; i += 1) {
+      const tag = String(i).padStart(4, 'x')
+      publish(store, fingerprint(`topic ${tag}`, `summary case ${tag} unique`), { sessionKey: 's', blockId: `b${i}`, tier: 1, topic: `topic ${tag}`, summary: `summary case ${tag} unique` })
+    }
+    assert.equal(store.listBlocks().length, 30)
+    assert.equal(store.listBlocks(10).length, 10, 'the bounded read loads at most the cap')
+    const h = fnv('orphan')
+    writeFileSync(path.join(dir, 'tok', `${h}.json`), 'fp-deadbeef\n')
+    const rep = store.reindex()
+    assert.equal(rep.blocks, 30)
+    const orph = path.join(dir, 'tok', `${h}.json`)
+    assert.ok(!existsSync(orph) || !readText(orph).includes('fp-deadbeef'), 'the orphan entry is dropped on reindex')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

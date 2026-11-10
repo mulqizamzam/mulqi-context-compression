@@ -1,5 +1,5 @@
 /**
- * writeSink containment — regression tests.
+ * writeSink containment: regression tests.
  *
  * `mulqi_cc_decompress` with `toFile: true` writes under
  * `<tmpdir>/mulqi-cc/<sessionKey>/`. The session key comes from the host

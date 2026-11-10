@@ -21,7 +21,7 @@ The recent working zone and the task's opening and latest user messages never fo
 |---|---|---|---|
 | `mulqi_cc_status` | Between task steps, or when context feels heavy | optional `truncateTo` (rare hard cap) | composition breakdown, compressible ranges with real sizes, block list, and (when the growth gate fires) a nudge with recommendations |
 | `mulqi_cc_compress` | After you finish consuming a range | `fromRef`, `toRef`, `topic`, `summary` (you write it), optional `tier`/`sourceBlockIds` | block id, compression ratio, tokens saved |
-| `mulqi_cc_search` | Before re-reading a file or re-running a command | `query`, optional `limit`, optional `scope: "shared"` | keyword hits across active block summaries + recent messages; with `scope: "shared"`, hits from other sessions' digest blocks in the shared fold store |
+| `mulqi_cc_search` | Before re-reading a file or re-running a command | `query`, optional `limit`, optional `scope: "shared"`, optional `remember: true` (shared) | keyword hits across active block summaries + recent messages; with `scope: "shared"`, hits from other sessions' digest blocks in the shared fold store; `remember` counts the hits as uses |
 | `mulqi_cc_decompress` | When a folded detail is needed again | `blockId` (`"list"` to enumerate), optional `fromRef`/`toRef` sub-range, optional `toFile: true` | restored text, or a file path (keeps context lean) |
 
 ## Timing: the growth gate
@@ -104,10 +104,17 @@ readable for recall without it being enabled.
   `nearby` when the store holds blocks that overlap this session's active work (topic + summary
   token match, 0.15 Jaccard floor). Each entry names its `fp`, `topic`, `sessionKey`, and `phase`.
 - `mulqi_cc_search` with `scope: "shared"` recalls store blocks from other sessions; each hit
-  carries `fp`, `sessionKey`, `topic`, `snippet`, `accessCount`, and `phase`.
+  carries `fp`, `sessionKey`, `topic`, `snippet`, `accessCount`, and `phase`. When a shared
+  recall actually shapes what you do next, call it with `remember: true`: each returned hit is
+  then counted as a use, which advances its fidelity phase.
 - Every block carries a fidelity `phase`: `archived` (deactivated or tier-2 distilled), `active`
-  (restored at least once since publication), or `dormant` (published and untouched). Restoring a
-  block through `mulqi_cc_decompress` counts as a use and drives the phase.
+  (used at least once since publication), or `dormant` (published and untouched). A local block's
+  uses are counted by `mulqi_cc_decompress`; a shared block's uses are counted by `remember: true`
+  on a shared recall.
+- Store degradation is surfaced, not hidden: a read that skipped block files or rejected a
+  record that does not match its own fingerprint shows up as a `degraded`/`skipped` count in the
+  shared-search DTO and as `myceliumDegraded` in `mulqi_cc_status`; a publish that had to skip a
+  corrupt index file shows up as `myceliumIndexDegraded` in the compress DTO.
 - Publishing failures never hide: the compress DTO reports `mycelium: "failed"` plus
   `myceliumError` when a write into the store fails, and the engine compression itself still
   succeeds.
