@@ -1,6 +1,6 @@
 {
   "name": "mulqi-context-compression",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Model-driven, incremental, hierarchical context compression for DeepSeek Harness: bounded context windows, restorable digest blocks, long-lived sessions. One bundled doctrine skill plus four native tools (status, compress, decompress, search), and an optional cross-session mycelium store that shares digest blocks between sessions of one user.",
   "type": "module",
   "main": "index.js",

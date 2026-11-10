@@ -202,7 +202,7 @@ shapes, and host wiring notes.
 ## Verify
 
 ```bash
-npm test          # node --test, 61 tests across fold engine, provider, tool contract, and mycelium
+npm test          # node --test, 62 tests across fold engine, provider, tool contract, and mycelium
 node --check index.js lib/fold.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
 ```
 
@@ -227,9 +227,13 @@ that the manifest pins the exact host version.
   publishing only on hosts where that trade is acceptable.
 - **Mycelium fingerprints are 32-bit FNV-1a:** two different digests can hash to the same
   `fp-<8hex>` slot, in which case the later publish overwrites the block file and the token
-  indexes point both digests at the surviving record. At user scale the birthday collision
-  probability is negligible; the policy is last-writer-wins, documented here instead of
-  silently engineered around.
+  indexes point both digests at the surviving record. The fingerprint covers key tokens only,
+  not full text, so a same-user writer can deliberately rewrite a block's summary under a
+  known fp (a "same topic, fresh summary" republish, or a hostile one); the store cannot
+  tell the two apart. Each record's `contentLength` makes such an override detectable after
+  the fact; signed blocks (a per-store key) are the planned structural closure. At user
+  scale the birthday collision probability is negligible; the policy is last-writer-wins,
+  documented here instead of silently engineered around.
 - **The store has no eviction:** published blocks stay until you delete the store directory.
   The `nearby` preview in `mulqi_cc_status` is a bounded read (at most 200 block files per
   call), so status cost stays flat as the store grows; full-store operations like `reindex()`

@@ -165,6 +165,9 @@ Every successful value passes through `output.render` → one `{ type: 'text' }`
   (off unless `1`/`true`), and `MULQI_CC_MYCELIUM_NEARBY` (default 3, capped at 10). The
   store handle is opened lazily by the tool layer and retried after a failure; a failure is
   surfaced, never swallowed.
+   Degradation counters are per store handle (per host process): `myceliumDegraded` in the status
+   DTO and `myceliumIndexDegraded` in the compress DTO reflect skips seen by *this* process;
+   a cross-process view of store health requires `reindex()` (or, later, an on-disk counter).
 - `ctx.get('sessionQuery')` is probed lazily, so boot never blocks. Absence is **reported**
   (`hostRead: 'unavailable'`) and a throwing read is **reported** (`hostRead: 'failed'` plus
   `hostReadError`); ingestion degrades to last-known state but the model is told.

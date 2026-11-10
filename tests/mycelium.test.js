@@ -530,3 +530,24 @@ test('RT-5: listBlocks respects its read cap; reindex drops orphaned index lines
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('RT-6: a legacy v0.2.0 JSON-array index migrates to lines on first publish', () => {
+  const { dir, store } = mkStore()
+  try {
+    const dna = fingerprint('build fix', 'sqlite lock timeout in ci')
+    publish(store, dna, { sessionKey: 's1', blockId: 'b1', tier: 1, topic: 'build fix', summary: 'sqlite lock timeout in ci' })
+    // forge the v0.2.0 legacy format back onto the "sqlite" index, then
+    // publish a second block sharing that token: the legacy file must
+    // migrate to lines and keep BOTH records
+    writeFileSync(path.join(dir, 'tok', `${fnv('sqlite')}.json`), JSON.stringify([dna.id]))
+    publish(store, fingerprint('c three', 'sqlite lock timeout gamma'), { sessionKey: 's3', blockId: 'b3', tier: 1, topic: 'c three', summary: 'sqlite lock timeout gamma' })
+    const raw = readText(path.join(dir, 'tok', `${fnv('sqlite')}.json`))
+    assert.ok(!raw.trimStart().startsWith('['), 'the legacy file was migrated to line format')
+    const fps = raw.trim().split('\n').filter((l) => /^fp-[0-9a-f]{8}$/.test(l))
+    assert.ok(fps.includes(dna.id), 'the legacy entry survives the migration')
+    assert.equal(new Set(fps).size, 2, 'legacy and new records both indexed')
+    assert.equal(store.searchBlocks('sqlite').hits.length, 2, 'recall spans both records')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
