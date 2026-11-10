@@ -149,7 +149,7 @@ re-read the underlying source to confirm before acting.
 
 | Mistake | Correction |
 |---|---|
-| `fromRef`/`toRef` guessed instead of taken from `mulqi_cc_status` ranges | Ranges carry real refs and sizes. Copy them. A bound that no live message holds (truncated or never ingested) now returns an explicit `unknown fromRef` / `unknown toRef` error instead of silently widening the restore, so a guessed ref fails loudly |
+| `fromRef`/`toRef` guessed instead of taken from `mulqi_cc_status` ranges | Ranges carry real refs and sizes. Copy them. A bound that no live message holds (truncated or never ingested) returns an explicit `unknown fromRef` / `unknown toRef` error instead of silently widening the restore, so a guessed ref fails loudly. Official sub-range contract: resolvable bounds outside the block span clamp to the block's span; unresolvable bounds are rejected |
 | `mulqi_cc_status` called with `truncateTo` and the numbers read before the cap ran | The DTO's `composition`, `nudge` and `blocks` are computed after the emergency truncation (v0.2.3); trust `out.truncation` plus the reported composition, not a pre-truncation snapshot |
 | Summary over the ~2K cap | Split the range or condense; the engine rejects over-cap summaries |
 | Range touches the recent zone and gets rejected | End the range before the recent zone starts (status shows it) |

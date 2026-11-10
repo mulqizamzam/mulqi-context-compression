@@ -48,9 +48,11 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
   - Writes are atomic: an exclusive-created private temp (`O_EXCL | O_NOFOLLOW`, mode 0600)
     plus rename under a 0700 dir. A symlink at the temp path is refused (never followed,
     never truncated); a regular leftover temp from a crashed writer is reclaimed.
-  - Index updates and fidelity counters are single `O_APPEND` lines, so concurrent
-    publishers and concurrent `bump()` calls cannot lose an entry; duplicate lines are
-    de-duplicated at read time.
+  - Index updates and fidelity counters are single `O_APPEND` lines through an
+    `O_NOFOLLOW` open (helper `appendLine` in `lib/store.js`), so concurrent publishers and
+    concurrent `bump()` calls cannot lose an entry, and a symlink planted at an index or
+    counter path is refused instead of followed; duplicate lines are de-duplicated at read
+    time.
   - A corrupt index file is left untouched: the affected token is skipped for that write and
     counted in `stats.degradedTokens`; `reindex()` is the only supported repair (it rebuilds
     every index from the block files and drops orphans).
@@ -155,8 +157,10 @@ must never see an empty composition and mistake it for "nothing happened".
   because the target index file is corrupt.
 - `mulqi_cc_decompress` → `{ ok, blockId, restoredRefs, text | file }` or `{ ok, listed[] }`
   when `blockId: "list"`. A `fromRef`/`toRef` bound that resolves to no live message
-  (truncated, or never ingested) returns `{ ok: false, error }` instead of silently
-  clamping (audit claim 2). `toFile` writes under `<tmpdir>/mulqi-cc/<sessionKey>/`
+  (truncated, or never ingested) returns `{ ok: false, error }` (audit claim 2);
+  resolvable bounds outside the block span clamp to the block's span (the official
+  sub-range contract, aligned in the tool description, README, and skill body).
+  `toFile` writes under `<tmpdir>/mulqi-cc/<sessionKey>/`
   (dir mode 0700; the file is exclusive-created with `wx` and never overwrites or follows
   a planted symlink; a free `-N` name is chosen when the base name exists).
 - `mulqi_cc_search` → `{ ok, hits: [{ kind, ref|id, tier?, topic?, score, snippet }] }` for

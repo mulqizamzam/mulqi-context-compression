@@ -635,3 +635,52 @@ test('RT-12: pre-existing permissive store directories are secured to 0700 on op
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('RT-13: a token index append never follows a symlink planted at the index path', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-idx-'))
+  try {
+    const store = openMyceliumStore({ baseDir: dir })
+    const seed = fingerprint('idx probe', 'sqlite lock timeout in ci')
+    store.publishBlock({ fp: seed.id, tokens: seed.tokens, sessionKey: 's1', blockId: 'b1', tier: 1, topic: 'idx probe', summary: 'sqlite lock timeout in ci' })
+    assert.ok(existsSync(path.join(dir, 'tok', `${fnv('sqlite')}.json`)), 'the seed publish must create the token index')
+    // plant a symlink at a token index that does not exist yet
+    const victim = path.join(dir, 'outside-victim.txt')
+    writeFileSync(victim, 'ORIGINAL')
+    const planted = path.join(dir, 'tok', `${fnv('locked')}.json`)
+    symlinkSync(victim, planted)
+    const dna2 = fingerprint('idx probe two', 'locked table gamma')
+    const rep = store.publishBlock({ fp: dna2.id, tokens: dna2.tokens, sessionKey: 's2', blockId: 'b2', tier: 1, topic: 'idx probe two', summary: 'locked table gamma' })
+    assert.ok(rep.degradedTokens >= 1, 'the update aimed at the symlinked index must be skipped and reported')
+    assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL', 'the victim behind the index symlink stays untouched')
+    assert.ok(lstatSync(planted).isSymbolicLink(), 'the index path stays a symlink, never replaced by a regular file')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-14: a counter append never follows a symlink planted at the counter path', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mcc-mycelium-cnt-'))
+  try {
+    const store = openMyceliumStore({ baseDir: dir })
+    const dna = fingerprint('counter probe', 'symlink guard check')
+    store.publishBlock({ fp: dna.id, tokens: dna.tokens, sessionKey: 's1', blockId: 'b1', tier: 1, topic: 'counter probe', summary: 'symlink guard check' })
+    const victim = path.join(dir, 'outside-victim.txt')
+    writeFileSync(victim, 'ORIGINAL')
+    symlinkSync(victim, path.join(dir, 'count', dna.id))
+    store.bump(dna.id)
+    store.bump(dna.id)
+    assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL', 'bumping through a planted counter symlink must not touch the victim')
+    assert.ok(lstatSync(path.join(dir, 'count', dna.id)).isSymbolicLink(), 'the counter path stays a symlink')
+    const out = openMyceliumStore({ baseDir: dir }).searchBlocks('counter')
+    assert.equal(out.hits[0].accessCount, 0, 'refused counter appends add no uses')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RT-15: the decompress contract names the official sub-range behaviour (clamp, reject)', () => {
+  const { byName } = hostWithStore({ storeDir: undefined, publish: false })
+  const d = byName.decompress
+  assert.match(d.description, /clamp/i, 'the description must state that resolvable out-of-block bounds clamp to the block span')
+  assert.match(d.description, /reject/i, 'the description must state that unresolvable bounds are rejected')
+})
