@@ -154,4 +154,29 @@ re-read the underlying source to confirm before acting.
 | Summary over the ~2K cap | Split the range or condense; the engine rejects over-cap summaries |
 | Range touches the recent zone and gets rejected | End the range before the recent zone starts (status shows it) |
 | `tier: 2` without `sourceBlockIds` | List the block ids from the status block list |
-| Expecting auto-compression | Nothing fires by itself: the doctrine (this skill) + your compress calls are the mechanism |
+| Expecting auto-compression to run your doctrine | The host's automatic compaction (pressure + overflow) runs by itself, and when the optional auto fold engine is enabled it records each compacted span as a restorable digest block with a `mulqi-fold` marker. Your manual `mulqi_cc_*` calls remain the mechanism for task-step folds |
+
+## Auto fold engine (opt-in)
+
+The bundle ships a second entry (`mulqi-context-compression/compaction-engine`, disabled by
+default) that plugs the fold into the host's automatic compaction. When enabled in the
+profile's cordis patch (with the host `compaction-basic` row disabled, because the
+`compaction` service slot holds one implementation), every automatic compaction between
+steps or on context overflow lands as a restorable digest block:
+
+- the host engine keeps the trigger policy, retention, lock, pricing, and durable
+  checkpoint framing; the engine entry overrides the host's `summarize()` hook.
+- digest mode: `llm` (default, the host's cache-aware one-shot summarization) or
+  `mechanical` (`MULQI_CC_AUTO_MODE=mechanical`: a zero-LLM-cost doctrine-shaped
+  template digest, no provider traffic).
+- each auto block is recorded into the same fold registry as the four tools:
+  `mulqi_cc_status` lists it, `mulqi_cc_decompress` restores the original span, and
+  `mulqi_cc_search` recalls its summary.
+- when `MULQI_CC_MYCELIUM_PUBLISH=1`, auto blocks are also published to the shared
+  mycelium store.
+- every compacted checkpoint carries a marker line
+  `[mulqi-fold: blkNNNNN ...]` telling the model how to restore the span.
+
+If the marker is missing from a checkpoint, the auto recording was skipped (protected
+span, unknown session identity, over-cap digest, or a host read failure); the
+compaction itself still landed. See `docs/auto.md`.

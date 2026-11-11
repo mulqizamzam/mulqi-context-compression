@@ -15,6 +15,7 @@ import { keyTokens, fingerprint, overlap, rankNearby, phaseFor, fnv, NEARBY_THRE
 import { openMyceliumStore } from '../lib/store.js'
 import { createFold, ingest, recordBlock, decompressBlock } from '../lib/fold.js'
 import { createFoldTools } from '../lib/tools.js'
+import { _resetRegistryForTests } from '../lib/fold-registry.js'
 
 // ---------- pure DNA layer ----------
 
@@ -206,6 +207,10 @@ test('store: baseDir must be absolute and writable', () => {
 // ---------- tool integration ----------
 
 function hostWithStore({ storeDir, publish }) {
+  // Test-only isolation: the fold registry is process-wide in production
+  // (shared by the tools and engine entries); each fixture call gets a
+  // clean one so fold state never leaks between tests in this file.
+  _resetRegistryForTests()
   const readMessages = async (key) => foldEvents[key] ?? []
   const sessionKeyFor = () => 'agent-a'
   const tools = createFoldTools({

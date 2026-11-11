@@ -5,6 +5,20 @@
 # package itself; the host loader resolves it from the profile's node_modules.
 # No config surface is exposed; the engine's gates ship with documented
 # defaults (see docs/engineering.md).
+#
+# The second row mounts the auto fold engine (compaction-engine.js): it makes
+# the host's automatic compaction record restorable digest blocks. It ships
+# DISABLED (the 'compaction' service slot already holds the host's
+# compaction-basic implementation). Opt in from the profile's own patch layer
+# (docs/auto.md): enable this row AND disable the host's compaction-basic row.
 - insert:
     - id: mulqi-cc
       name: mulqi-context-compression
+    - id: mulqi-cc-fold-engine
+      name: 'mulqi-context-compression/compaction-engine'
+      disabled: true
+      config:
+        auto: true
+        thresholdRatio: 0.75
+        headroomTokens: 32000
+        retainRatio: 0.16

@@ -10,7 +10,8 @@ mycelium) carries those digest blocks between sessions of the same user.
 - Runtime: Node.js `>=22`, builtins only, zero runtime dependencies
 - Surfaces: one bundled doctrine skill (`mulqi-context-compression`, catalog rank 600) plus
   four native tools (`mulqi_cc_status`, `mulqi_cc_compress`, `mulqi_cc_decompress`,
-  `mulqi_cc_search`), and the cross-session mycelium store (publishing off by default)
+  `mulqi_cc_search`), the cross-session mycelium store (publishing off by default), and the
+  opt-in auto fold engine that plugs the fold into the host's automatic compaction
 
 ## What it does
 
@@ -92,14 +93,14 @@ This removes the pnpm dependency from the profile; the mount row disappears from
   actually running:
 
   ```bash
-  dsh plugin --profile <name> allow-version mulqi-context-compression@0.2.5 \
+  dsh plugin --profile <name> allow-version mulqi-context-compression@0.3.0 \
     --dsh-version <running-host-version> --accept-risk
   ```
 
   The host prints its own warning ("allowing incompatible plugin versions can break the
   application or corrupt data. Approval applies only to the exact package and DSH versions")
   and refuses to approve a version that is not the one currently running. Revoke the entry
-  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.2.5
+  again with `dsh plugin --profile <name> revoke-version mulqi-context-compression@0.3.0
   --dsh-version <version>`. An exemption is a persistent row in the profile's
   `compatibility.json`; prefer matching host versions over carrying exemptions.
 - **No mount row at all.** The bundle never registered: the install failed, or the profile
@@ -198,15 +199,43 @@ The mycelium store is configured at host boot, not through the profile:
 | `MULQI_CC_MYCELIUM_DIR` | `$DSH_HOME/mulqi-cc-mycelium` (or `~/.dsh/mulqi-cc-mycelium` when `DSH_HOME` is unset) | where the shared block store lives |
 | `MULQI_CC_MYCELIUM_PUBLISH` | off | set to `1` to write this host's digest blocks into the shared store |
 | `MULQI_CC_MYCELIUM_NEARBY` | `3` | cap on `nearby` previews in `mulqi_cc_status` |
+| `MULQI_CC_AUTO_MODE` | `llm` | digest mode of the auto fold engine: `llm` (host cache-aware summarization) or `mechanical` (zero-LLM template digest) |
+| `MULQI_CC_AUTO_MAX_TOKENS` | `4096` | tier-1 cap applied to auto-fold blocks (floors at 2048) |
 
 Token counting uses a documented `chars/4` heuristic, so there is no tokenizer dependency.
+
+## Auto fold engine (opt-in, no model trigger)
+
+The bundle's second entry (`compaction-engine.js`, `MulqiFoldEngine`) plugs the fold into
+the host's automatic compaction: the host's `agent/pre-step` pressure trigger and
+context-overflow recovery run without any model call, and each compacted span is
+recorded as a restorable digest block in the same fold registry as the four tools,
+with a `[mulqi-fold: ...]` marker line in the checkpoint. The host engine keeps its
+trigger policy, retention, lock, and durable checkpoint framing; the entry overrides
+only the engine's `summarize()` hook.
+
+The row ships `disabled: true` in `cordis.patch.yml` (the `compaction` service slot
+holds one implementation). Opt in from your profile's patch layer:
+
+```yaml
+- id: mulqi-cc-fold-engine
+  disabled: false
+
+- id: compaction-basic
+  disabled: true
+```
+
+then restart the host. Full guide, failure semantics, and pressure-policy notes:
+`docs/auto.md`.
 
 ## What is in the bundle
 
 The `files` whitelist in `package.json` ships exactly: `index.js` (Cordis entry, registers the
-skill provider and four tools), `lib/**` (the fold engine, the mycelium DNA layer, the shared block store, tool builder,
- and skill provider),
-`skills/**` (the doctrine skill), `cordis.patch.yml` (the bundle mount row), `docs/**`,
+skill provider and four tools), `compaction-engine.js` (the opt-in auto fold engine entry),
+`lib/**` (the fold engine, the process-wide fold registry, the mechanical digest, the
+environment surface, the write sink, the mycelium DNA layer, the shared block store, tool
+builder, and skill provider),
+`skills/**` (the doctrine skill), `cordis.patch.yml` (the bundle mount rows), `docs/**`,
 `README.md`, `NOTICE.md`, `LICENSE`. The test suite (`tests/*.test.js`) and the private audit
 notes (`work/`) stay out of the published package.
 
@@ -216,8 +245,10 @@ shapes, and host wiring notes.
 ## Verify
 
 ```bash
-npm test          # node --test, 73 tests across fold engine, provider, tool contract, and mycelium
-node --check index.js lib/fold.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
+npm test          # node --test, 92 tests: fold engine, registry, digest, auto-fold, provider, tool contract, mycelium
+node --check index.js compaction-engine.js lib/fold.js lib/fold-registry.js lib/fold-digest.js lib/env.js lib/write-sink.js lib/mycelium.js lib/store.js lib/provider.js lib/tools.js
+# host-gated engine tests (real BasicCompactionBackend subclassing + cross-entry proof):
+MULQI_CC_HOST_MODULES=/path/to/deepseek-harness node --test tests/engine-host.test.js
 ```
 
 The registry test suite also asserts that the private `work/` directory is not packaged and
@@ -225,9 +256,10 @@ that the manifest pins the exact host version.
 
 ## Known boundaries
 
-- **No wire-level proxy:** compression state lives in-process per session. Host compaction, if
-  configured, remains the backstop for overflow. The model-API cache economics of a proxy
-  layout are out of scope for this native bundle.
+- **No wire-level proxy:** compression state lives in-process per session. With the auto fold
+  engine enabled (opt-in), the host's automatic compaction itself runs through the fold;
+  otherwise host compaction remains the plain-summary backstop for overflow. The model-API
+  cache economics of a proxy layout are out of scope for this native bundle.
 - **In-memory fold state:** local blocks are not persisted across host restarts. The mycelium
   store (when publishing is enabled) persists shared blocks to disk under the user's home, but
   a block's own original messages still live only inside the session that compressed them.

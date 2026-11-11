@@ -7,6 +7,11 @@ For agents and integrators maintaining or extending this bundle. Not user-facing
 | File | Exports | Role |
 |---|---|---|
 | `index.js` | `name`, `inject`, `apply(ctx)` | Cordis entry: registers skill provider + 4 tools; wires host services and the mycelium store config |
+| `compaction-engine.js` | `default` (MulqiFoldEngine), `agentSessionKey`, `buildMechanicalDigest` | Opt-in auto fold engine entry: subclasses the host's basic compaction backend; records each automatic compaction as a restorable digest block with a marker line |
+| `lib/fold-registry.js` | `foldRegistry()`, `_resetRegistryForTests()` | Process-wide fold registry: shared session-keyed fold state + auto-block record/publish seam used by both entries |
+| `lib/fold-digest.js` | `buildMechanicalDigest(input, opts)`, `MECHANICAL_DIGEST_CAP` | Zero-LLM mechanical digest builder (goal, directives, errors, artifacts, open) with priority-trim cap |
+| `lib/env.js` | `mulqiMyceliumConfig(env)`, `mulqiAutoMode(env)`, `mulqiAutoCapTokens(env)` | Environment surface: mycelium dir/publish/nearby + auto engine mode/cap |
+| `lib/write-sink.js` | `createWriteSink()`, `safeSessionKey(key)` | Exclusive-created temp file sink for `toFile` restores (wx gate, refusal outside the sink dir) |
 | `lib/fold.js` | `createFold`, `ingest`, `recordBlock`, `decompressBlock`, `searchContext`, `nudgeFor`, `composition`, `promoteTier`, `emergencyTruncate`, `stats`, `estimateTokens`, `surfaceEventsToMessages`, `DEFAULTS` | Pure fold engine (zero deps, no I/O, no clock) |
 | `lib/mycelium.js` | `keyTokens`, `fnv`, `fingerprint`, `fingerprintMatches`, `overlap`, `rankNearby`, `phaseFor`, `NEARBY_THRESHOLD` | Pure DNA layer: content-addressed block ids, token overlap, fidelity phases |
 | `lib/store.js` | `openMyceliumStore` | Shared block store I/O (atomic writes, token index, fail-safe validation) |
@@ -227,3 +232,65 @@ Every successful value passes through `output.render` → one `{ type: 'text' }`
   for local blocks). Red-team regression tests are labelled `RT-1` through `RT-5`.
 - Gate: `node --check` on all shipped JS; `node --test tests/`; positive/negative boot controls
   in a scratch `DSH_HOME`; `dsh --dump-config` mount check. No system install, no publish.
+
+## Auto fold engine (v0.3.0)
+
+### Host contract
+
+The host registers a single `compaction` service per context
+(`ctx.reflect.provide('compaction', engine, { owner })`). The engine class is
+resolved at bundle-load time: `compaction-engine.js` dynamically imports
+`@deepseek-ai/dsh-compaction-basic` (or `MULQI_CC_ENGINE_BASE` file URL, a
+test seam). On import failure the entry exports an inactive no-op class that
+registers no service and logs one visible warning (fail-open; the boot
+continues with whatever compaction the host has).
+
+`MulqiFoldEngine extends BasicCompactionEngine` and overrides exactly one
+hook, `summarize(input, agent, signal)`; everything else (pressure policy,
+retention, lock, shrink-check, overflow retry, durable checkpoint framing,
+`frameSummary`) is inherited:
+
+1. `compactRegion(start, end, agent, signal)` is overridden to capture the
+   exact shadowed span seqs before delegating to the base implementation
+   (`_captureSpan`, a public test seam), stored in a per-agent `#inFlight`
+   WeakMap, released in `finally`.
+2. After `super.summarize()` (or the mechanical digest when
+   `MULQI_CC_AUTO_MODE=mechanical`), the engine resolves the session key
+   (`agent.id ?? agent.session.id`, the same identity the tools entry keys
+   the registry by) and calls
+   `recordAutoBlock({ key, startSeq, endSeq, digest, topic, maxTokens })`.
+3. On success, a marker line
+   `[mulqi-fold: blkNNNNN ... restore the original span with
+   mulqi_cc_decompress {"blockId":"blkNNNNN"}]` is appended to the returned
+   summary's text block, and `publishAutoBlock` runs when publishing is on.
+4. Fail-open: unknown span edges, protected spans, over-cap digests, and
+   unknown session identity return the plain host summary without a marker.
+
+### Registry
+
+Both entries share one process-wide registry (`lib/fold-registry.js`):
+
+- `configure(d)` is per-field first-wins (readMessages, sessionKeyFor,
+  writeFile, config, mycelium, logger); the tools entry and the engine entry
+  configure the same fields, so whichever boots first wins and both entries
+  observe identical state.
+- `ensureFold(key)` ingests the host surface via `readMessages`
+   (`ctx.get('sessionQuery').readSurface(key)`, `ok`/`unavailable`/`failed`
+   semantics identical to the tools entry's legacy `foldForCall`).
+- `recordAutoBlock` resolves span refs through `fold.bySeq` / `fold.byRef`,
+   truncates over-cap digests (never rejects), and raises the fold's
+   `maxSummaryTokens` monotonically to `max(cfg, MULQI_CC_AUTO_MAX_TOKENS)`
+   so auto blocks pass `recordBlock`'s cap check.
+- `publishForDto` / `publishAutoBlock` reuse the legacy byte-identical
+   mycelium publish path.
+
+### Digest modes
+
+- `llm` (default): the host's cache-aware `summarizeWithLlm` result, unchanged
+  byte-for-byte from the base engine; only the marker and fold recording are
+  additive.
+- `mechanical`: `buildMechanicalDigest` (lib/fold-digest.js) builds a
+  doctrine-shaped digest from the region messages: goal (first user message),
+  directives, errors/failures, artifacts (paths, URLs, ports, commit ids,
+  versions), final state, open items; priority-trimmed to the cap; zero
+  provider traffic.

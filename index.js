@@ -20,16 +20,18 @@
  *      MULQI_CC_MYCELIUM_PUBLISH=1); shared-scope recall works as long as
  *      the store directory exists and is readable. The nearby-preview cap
  *      defaults to 3 (override with MULQI_CC_MYCELIUM_NEARBY, 1..10).
+ *   7. the process-wide fold registry (lib/fold-registry.js) shares fold
+ *      state between this entry and the auto fold engine entry
+ *      (compaction-engine.js), so auto-fold blocks are visible to the tools
+ *      and model blocks to the engine;
  *
  * Zero runtime dependencies (Node builtins only).
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
-import path from 'node:path'
-
+import { mulqiMyceliumConfig } from './lib/env.js'
 import { makeProvider } from './lib/provider.js'
 import { createFoldTools } from './lib/tools.js'
+import { createWriteSink } from './lib/write-sink.js'
 
 /** Cordis entry id (diagnostic label in host logs). */
 export const name = 'mulqi-cc'
@@ -60,48 +62,18 @@ export function apply(ctx) {
     return sessionQuery.readSurface(sessionId ?? 'default')
   }
 
-  // The session key is a host identity, not a path segment we control. Confine
-  // it to one safe directory name (same policy as the host's safeSessionId)
-  // and, independently, refuse any target that resolves outside the base dir.
-  const safeKey = (key) =>
-    String(key ?? 'default')
-      .replace(/[^A-Za-z0-9._-]/g, '_')
-      .slice(0, 128) || 'default'
-
-  const writeSink = (fileBaseName, text, key) => {
-    const base = path.resolve(tmpdir(), 'mulqi-cc')
-    const dir = path.join(base, safeKey(key))
-    const target = path.resolve(dir, fileBaseName)
-    if (target !== dir && !target.startsWith(dir + path.sep)) {
-      throw new Error('mulqi-cc: refusing to write outside the session directory')
-    }
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    // pick a free name, then exclusive-create: never overwrite an existing
-    // file and never follow a symlink planted in the shared tmp dir
-    let free = target
-    let n = 1
-    while (existsSync(free)) free = path.join(dir, fileBaseName.replace(/\.txt$/, `-${n++}.txt`))
-    writeFileSync(free, text, { encoding: 'utf8', flag: 'wx' })
-    return free
-  }
+  // The session key is a host identity, not a path segment we control. The
+  // shared write sink (lib/write-sink.js) confines it to one safe directory
+  // name and refuses any target that resolves outside its base dir; the same
+  // sink is used by the auto fold engine entry, so both share one policy.
+  const writeSink = createWriteSink()
 
   const defs = createFoldTools({
     readMessages,
     sessionKeyFor,
     writeFile: writeSink,
     config: undefined,
-    mycelium: {
-      dir:
-        process.env.MULQI_CC_MYCELIUM_DIR?.trim() ||
-        (process.env.DSH_HOME
-          ? path.join(process.env.DSH_HOME, 'mulqi-cc-mycelium')
-          : path.join(homedir(), '.dsh', 'mulqi-cc-mycelium')),
-      publish: process.env.MULQI_CC_MYCELIUM_PUBLISH === '1' || process.env.MULQI_CC_MYCELIUM_PUBLISH === 'true',
-      nearbyLimit: (() => {
-        const nl = Number(process.env.MULQI_CC_MYCELIUM_NEARBY)
-        return Number.isFinite(nl) && nl > 0 ? Math.min(nl, 10) : 3
-      })(),
-    },
+    mycelium: mulqiMyceliumConfig(),
   })
   for (const def of defs) disposers.push(ctx.tools.register(def))
 
